@@ -5,12 +5,14 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { judge } from "./judge.js";
+import { assessTurn, judge } from "./judge.js";
 import { campaignDir, campaignHash, journal, listCandidates, loadRegister, saveFinding, saveRegister } from "./memory.js";
 import { loadTransport, preflight } from "./preflight.js";
 import { promote } from "./promote.js";
-import { loadBuckets, render, writeSummary } from "./report.js";
+import { banner, consoleWidth } from "./box.js";
+import { loadBuckets, render, renderHtml, writeSummary } from "./report.js";
 import { loadEnvFile, loadProfile } from "./run.js";
+import { appendReplay, appendTurn } from "./turnlog.js";
 
 function fatal(line) {
   console.error(line);
@@ -75,6 +77,7 @@ export async function main(options = {}) {
       for (let turnIndex = 0; turnIndex < finding.transcript.length; turnIndex += 1) {
         if (turnIndex > 0 && profile.limits.delayMs > 0) await sleep(profile.limits.delayMs);
         const user = finding.transcript[turnIndex].user;
+        const started = Date.now();
         const turn = await dialect.send({
           url,
           allowHosts: profile.allowHosts,
@@ -84,22 +87,51 @@ export async function main(options = {}) {
           sessionId,
           history,
         });
+        const ms = Date.now() - started;
+        const at = new Date().toISOString();
         turns.push(turn);
         sessionId = turn.sessionId;
         history = [...history, { role: "user", content: user }, { role: "assistant", content: turn.reply }];
+        const current = assessTurn(turn, oracle, turns.length - 1);
+        await appendTurn(dir, finding.behaviorId, {
+          at,
+          source: finding.turnSources?.[turnIndex] ?? "opening",
+          ms,
+          oracle: turn.oracle,
+          user,
+          reply: turn.reply,
+          toolCalls: turn.toolCalls,
+          hit: current.hit,
+          pathMissing: current.pathMissing === true,
+          oracleId: current.oracleId,
+          matched: current.matched,
+        });
       }
-      return judge(turns, oracle).hit ? "hit" : "miss";
+      return { status: judge(turns, oracle).hit ? "hit" : "miss", sessionId };
     };
+
+    const noteReplay = (index, result, sessionId, retried) =>
+      appendReplay(dir, finding.behaviorId, {
+        rep: index + 1,
+        sessionId,
+        result,
+        retried,
+      });
 
     const replayWithRetry = async (index) => {
       try {
-        return await oneRep(index);
+        const done = await oneRep(index);
+        await noteReplay(index, done.status, done.sessionId, false);
+        return done.status;
       } catch (err) {
         if (err.name !== "TransportError") throw err;
         try {
-          return await oneRep(index);
+          const done = await oneRep(index);
+          await noteReplay(index, done.status, done.sessionId, true);
+          return done.status;
         } catch (retryErr) {
           if (retryErr.name !== "TransportError") throw retryErr;
+          await noteReplay(index, "transport", null, true);
           return "transport";
         }
       }
@@ -146,9 +178,11 @@ export async function main(options = {}) {
     await journal(dir, finding.behaviorId, "rejected");
   }
 
-  const text = render(await loadBuckets(dir));
-  await writeSummary(dir, text);
-  console.log(text);
+  const buckets = await loadBuckets(dir);
+  await writeSummary(dir, renderHtml(buckets));
+  console.log(banner("RESULTS"));
+  console.log("");
+  console.log(render(buckets, consoleWidth()));
   return { ok: true, dir, hash, modelId: checked.modelId };
 }
 

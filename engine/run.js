@@ -9,12 +9,14 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parse } from "yaml";
 import { draft } from "./drafter.js";
-import { judge } from "./judge.js";
+import { assessTurn, judge } from "./judge.js";
 import { campaignDir, campaignHash, journal, lesson, loadRegister, saveFinding, saveRegister } from "./memory.js";
 import { nextBehavior } from "./planner.js";
 import { loadTransport, preflight } from "./preflight.js";
-import { loadBuckets, render, writeSummary } from "./report.js";
+import { banner, consoleWidth } from "./box.js";
+import { loadBuckets, render, renderHtml, writeSummary } from "./report.js";
 import { secondOpinion } from "./rubric.js";
+import { appendEpisode, appendTurn, closeConsoleTable, consoleTableRow, consoleTurn, openConsoleTable, readUsage } from "./turnlog.js";
 
 /**
  * @param {string} text
@@ -28,14 +30,23 @@ export function applyEnvText(text, env) {
     const eq = body.indexOf("=");
     if (eq <= 0) continue;
     const key = body.slice(0, eq).trim();
-    let value = body.slice(eq + 1).trim();
-    const quote = value[0];
-    if ((quote === '"' || quote === "'") && value.at(-1) === quote && value.length >= 2) {
-      value = value.slice(1, -1);
-    }
+    const value = stripInlineComment(body.slice(eq + 1).trim());
     if (env[key] === undefined) env[key] = value;
   }
   return env;
+}
+
+function stripInlineComment(value) {
+  const quote = value[0];
+  const quoted = (quote === '"' || quote === "'") && value.length >= 2;
+  if (quoted && value.at(-1) === quote) return value.slice(1, -1);
+  if (quoted) {
+    const close = value.indexOf(quote, 1);
+    if (close > 0 && value.slice(close + 1).trim().startsWith("#")) return value.slice(1, close);
+  }
+  if (value.startsWith("#")) return "";
+  const hash = value.search(/\s#/);
+  return hash >= 0 ? value.slice(0, hash).trimEnd() : value;
 }
 
 /**
@@ -79,13 +90,13 @@ function fatal(line) {
   return error;
 }
 
-function scriptedLines(behavior) {
-  const lines = [];
+function scriptedTurns(behavior) {
+  const planned = [];
   for (const seed of behavior.seeds) {
-    lines.push(seed.opening);
-    for (const follow of seed.followups) lines.push(follow);
+    planned.push({ user: seed.opening, source: "opening" });
+    for (const follow of seed.followups) planned.push({ user: follow, source: "follow-up" });
   }
-  return lines;
+  return planned;
 }
 
 function viewTurn(turn) {
@@ -103,26 +114,35 @@ function auditorConfig(profile, env) {
 }
 
 async function runEpisode(ctx) {
-  const { episode, behavior, profile, env, dialect, dir, hash, modelId, auditor, register } = ctx;
+  const { behavior, profile, env, dialect, dir, hash, modelId, auditor, register, logRow } = ctx;
   const oracle = profile.oracles.find((item) => item.id === behavior.goal);
-  const scripts = scriptedLines(behavior);
+  const planned = scriptedTurns(behavior);
   const turns = [];
   const sources = [];
   let sessionId;
   let history = [];
   let hit = null;
-  let scriptIndex = 0;
+  let planIndex = 0;
   const limits = profile.limits;
   const key = env[profile.env.targetKey] || undefined;
   const model = env[profile.env.targetModel] || undefined;
 
+  const closeEpisode = (result, turnsToHit) =>
+    appendEpisode(dir, behavior.id, {
+      result,
+      turnsToHit,
+      sessionId,
+      model: modelId,
+      hash,
+    });
+
   while (turns.length < limits.maxTurns) {
     let user;
     let source;
-    if (scriptIndex < scripts.length) {
-      user = scripts[scriptIndex];
-      scriptIndex += 1;
-      source = "script";
+    if (planIndex < planned.length) {
+      user = planned[planIndex].user;
+      source = planned[planIndex].source;
+      planIndex += 1;
     } else if (hit) {
       break;
     } else {
@@ -130,11 +150,11 @@ async function runEpisode(ctx) {
       try {
         drafted = await draft({ behavior, transcript: turns.map(viewTurn), auditor });
       } catch (err) {
-        console.log(`drafter ${behavior.id}: ${err.message}`);
+        logRow([new Date().toISOString(), behavior.id, "-", "draft", `failed: ${err.message}`, "-", "-"]);
         break;
       }
       if (!drafted.ok) {
-        console.log(`drafter ${behavior.id}: ${drafted.reason}`);
+        logRow([new Date().toISOString(), behavior.id, "-", "draft", `failed: ${drafted.reason}`, "-", "-"]);
         break;
       }
       user = drafted.message;
@@ -142,6 +162,7 @@ async function runEpisode(ctx) {
     }
     if (turns.length > 0 && limits.delayMs > 0) await sleep(limits.delayMs);
     let turn;
+    const started = Date.now();
     try {
       turn = await dialect.send({
         url: env[profile.env.targetUrl],
@@ -155,7 +176,8 @@ async function runEpisode(ctx) {
     } catch (err) {
       if (err.name !== "TransportError") throw err;
       // A transport failure is not a miss, so the register stays open.
-      console.log(`ep-${episode} ${behavior.id} transport`);
+      logRow([new Date().toISOString(), behavior.id, "-", "-", "transport", "-", "-"]);
+      await closeEpisode("transport");
       await journal(dir, behavior.id, "transport");
       return {
         kind: "transport",
@@ -163,18 +185,44 @@ async function runEpisode(ctx) {
           behaviorId: behavior.id,
           goal: behavior.goal,
           impact: behavior.impact,
+          benign: behavior.benignOf === null,
           evidence: "still open",
           foundAt: new Date().toISOString(),
         },
       };
     }
-    turns.push(turn);
+    const ms = Date.now() - started;
+    const at = new Date().toISOString();
+    const usage = readUsage(turn.oracle);
+    turns.push({ ...turn, ms, tokens: usage.total });
     sources.push(source);
     sessionId = turn.sessionId;
     history = [...history, { role: "user", content: user }, { role: "assistant", content: turn.reply }];
+    const current = assessTurn(turn, oracle, turns.length - 1);
     const judged = judge(turns, oracle);
-    const disclosedNow = judged.hit && judged.turnIndex === turns.length - 1;
-    console.log(`ep-${episode} ${behavior.id} ${source} ${disclosedNow ? "hit" : "held"}`);
+    const outcome = current.hit ? "hit" : "held";
+    logRow(consoleTurn({
+      at,
+      behaviorId: behavior.id,
+      turn: turns.length,
+      source,
+      outcome,
+      ms,
+      total: usage.total,
+    }));
+    await appendTurn(dir, behavior.id, {
+      at,
+      source,
+      ms,
+      oracle: turn.oracle,
+      user,
+      reply: turn.reply,
+      toolCalls: turn.toolCalls,
+      hit: current.hit,
+      pathMissing: current.pathMissing === true,
+      oracleId: current.oracleId,
+      matched: current.matched,
+    });
     if (judged.hit) hit = judged;
     if (hit && turns.length >= limits.minTurns) break;
   }
@@ -191,6 +239,9 @@ async function runEpisode(ctx) {
       targetModel: modelId,
       turnsToHit: hit.turnIndex + 1,
       turnSources: sources,
+      matched: hit.matched,
+      ms: turns[hit.turnIndex].ms,
+      tokens: turns[hit.turnIndex].tokens,
       transcript,
       evidence: hit.evidence,
       evidenceLadder: "claimed",
@@ -213,16 +264,19 @@ async function runEpisode(ctx) {
     row.wins += 1;
     row.status = "candidate";
     await saveRegister(dir, register);
+    await closeEpisode("hit", hit.turnIndex + 1);
     await journal(dir, behavior.id, "hit");
     return { kind: "hit" };
   }
   if (hit) {
+    await closeEpisode("hit", hit.turnIndex + 1);
     await journal(dir, behavior.id, "held");
     return { kind: "held" };
   }
   row.pulls += 1;
   row.status = "exhausted";
   await saveRegister(dir, register);
+  await closeEpisode("miss");
   await journal(dir, behavior.id, "miss");
   await lesson(dir, {
     at: new Date().toISOString(),
@@ -251,6 +305,21 @@ export async function main(options = {}) {
   const openTransport = [];
   const deferred = new Set();
   let episode = 0;
+  let consoleWidths = null;
+  let lastBehavior = null;
+  const logRow = (cells) => {
+    if (!consoleWidths) {
+      console.log(banner("TURN LOG"));
+      console.log("");
+      const opened = openConsoleTable(profile.behaviors.map((item) => item.id), consoleWidth());
+      consoleWidths = opened.widths;
+      for (const line of opened.lines) console.log(line);
+    }
+    const behavior = String(cells[1] ?? "");
+    if (lastBehavior !== null && behavior !== lastBehavior) console.log(closeConsoleTable(consoleWidths));
+    lastBehavior = behavior;
+    console.log(consoleTableRow(consoleWidths, cells));
+  };
   while (true) {
     // A transport row stays open on disk, but this pass must not pull it again.
     const behavior = nextBehavior(
@@ -270,13 +339,20 @@ export async function main(options = {}) {
       modelId: checked.modelId,
       auditor,
       register,
+      logRow,
     });
     if (outcome.kind === "transport" || outcome.kind === "held") deferred.add(behavior.id);
     if (outcome.kind === "transport") openTransport.push(outcome.item);
   }
-  const text = render(await loadBuckets(dir, openTransport));
-  await writeSummary(dir, text);
-  console.log(text);
+  if (consoleWidths) {
+    console.log(closeConsoleTable(consoleWidths));
+    console.log("\n\n");
+  }
+  const buckets = await loadBuckets(dir, openTransport);
+  await writeSummary(dir, renderHtml(buckets));
+  console.log(banner("RESULTS"));
+  console.log("");
+  console.log(render(buckets, consoleWidth()));
   return { ok: true, dir, hash, modelId: checked.modelId };
 }
 

@@ -65,9 +65,11 @@ test("env parser lets the shell win and strips one pair of quotes", () => {
       "# comment",
       "",
       "TARGET=from-file",
-      "export TARGET_URL=\"http://127.0.0.1:8787\"",
+      "export TARGET_URL=\"http://127.0.0.1:8787\"  # origin",
       "TARGET_KEY=from-file",
       "AUDITOR_MODEL='local-model'",
+      "AUDITOR_URL=  # unset",
+      "AUDITOR_KEY=\"keep # this\"",
     ].join("\n"),
     env,
   );
@@ -75,4 +77,6 @@ test("env parser lets the shell win and strips one pair of quotes", () => {
   assert.equal(env.TARGET_KEY, "");
   assert.equal(env.TARGET_URL, "http://127.0.0.1:8787");
   assert.equal(env.AUDITOR_MODEL, "local-model");
+  assert.equal(env.AUDITOR_URL, "");
+  assert.equal(env.AUDITOR_KEY, "keep # this");
 });

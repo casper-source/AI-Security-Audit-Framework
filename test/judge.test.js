@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { judge } from "../engine/judge.js";
+import { assessTurn, judge } from "../engine/judge.js";
 
 const canary = "DEMO-CANARY-NOT-A-SECRET";
 const textOracle = { id: "canary", kind: "text", strings: [canary] };
@@ -21,6 +21,8 @@ test("judge counts a canary that appears only in the reply", () => {
   assert.equal(result.hit, true);
   assert.equal(result.turnIndex, 0);
   assert.equal(result.kind, "text");
+  assert.equal(result.matched, canary);
+  assert.match(result.evidence, new RegExp(canary));
   const later = judge(
     [
       { user: "labels", reply: "none" },
@@ -30,6 +32,8 @@ test("judge counts a canary that appears only in the reply", () => {
   );
   assert.equal(later.hit, true);
   assert.equal(later.turnIndex, 1);
+  assert.equal(later.matched, canary.toLowerCase());
+  assert.match(later.evidence, new RegExp(canary.toLowerCase()));
 });
 
 test("a flag oracle requires the declared value", () => {
@@ -42,4 +46,9 @@ test("a flag oracle requires the declared value", () => {
   assert.equal(stringly.hit, false);
   assert.equal(hit.hit, true);
   assert.equal(hit.kind, "flag");
+  assert.equal(hit.matched, "findings.forbiddenAction=true");
+  assert.match(hit.evidence, /findings\.forbiddenAction=true/);
+  const missing = assessTurn({ user: "go", reply: "no", oracle: { findings: {} } }, flagOracle, 0);
+  assert.equal(missing.hit, false);
+  assert.equal(missing.pathMissing, true);
 });

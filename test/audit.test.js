@@ -56,12 +56,16 @@ test("a scripted 429 still becomes a candidate and verify promotes the regressio
     const claimed = await readJson(resolve(dir, "findings", "leak-canary.json"));
     assert.equal(claimed.evidenceLadder, "claimed");
     assert.equal(claimed.turnsToHit, 2);
-    assert.deepEqual(claimed.turnSources, ["script", "script"]);
+    assert.deepEqual(claimed.turnSources, ["opening", "follow-up"]);
+    assert.equal(claimed.matched, LINES.canary);
+    assert.equal(typeof claimed.ms, "number");
+    assert.equal(claimed.tokens, null);
     assert.equal(claimed.benign, false);
     assert.equal(claimed.transcript[1].user.includes(LINES.canary), false);
     assert.match(claimed.transcript[1].reply, new RegExp(LINES.canary));
-    const summary = await readFile(resolve(dir, "summary.md"), "utf8");
-    assert.match(summary, /^claimed\n/);
+    const summary = await readFile(resolve(dir, "summary.html"), "utf8");
+    assert.match(summary, /id="claimed"/);
+    await assert.rejects(() => access(resolve(dir, "summary.md")));
     mock.clearRequests();
     await verifyAudit({ cwd: root, env: testEnv(mock.url) });
     const leak = await readJson(resolve(dir, "findings", "leak-canary.json"));
@@ -90,6 +94,9 @@ test("a scripted 429 still becomes a candidate and verify promotes the regressio
     assert.equal(verified.behaviors["leak-canary"].status, "confirmed");
     assert.equal(verified.behaviors["forbidden-action"].status, "confirmed");
     assert.equal(verified.behaviors["read-user"].status, "exhausted");
+    const replayLog = await readFile(resolve(dir, "logs", "forbidden-action.md"), "utf8");
+    assert.match(replayLog, /replay 1 session=\S+ result=hit retry=no/);
+    assert.match(replayLog, /replay 3 session=\S+ result=hit retry=no/);
   } finally {
     await mock.close();
     if (dir) await rm(dir, { recursive: true, force: true });
@@ -128,8 +135,10 @@ test("transport during run stays open and is not a transport file", { timeout: 2
     assert.equal(register.behaviors["read-user"].status, "open");
     assert.equal(register.behaviors["read-user"].pulls, 0);
     await assert.rejects(() => access(resolve(dir, "transport", "read-user.json")));
-    const summary = await readFile(resolve(dir, "summary.md"), "utf8");
-    assert.match(summary, /read-user\s+canary\s+transport\s+still open/);
+    const summary = await readFile(resolve(dir, "summary.html"), "utf8");
+    assert.match(summary, /read-user/);
+    assert.match(summary, /still open/);
+    assert.match(summary, /class="impact LOW"/);
     const journal = await readFile(resolve(dir, "journal.md"), "utf8");
     assert.match(journal, /read-user transport/);
   } finally {
@@ -171,16 +180,81 @@ test("a rubric disagreement names a claim and still names it after confirm", asy
     const disagreement = await readJson(resolve(dir, "disagreements", "leak-canary.json"));
     assert.equal(disagreement.rationale, "second opinion declines");
     assert.equal(seen.some((body) => body.includes(LINES.canary)), false);
-    const before = await readFile(resolve(dir, "summary.md"), "utf8");
+    const before = await readFile(resolve(dir, "summary.html"), "utf8");
     assert.match(before, /claimed: second opinion declines/);
     await verifyAudit({ cwd: root, env });
     const confirmed = await readJson(resolve(dir, "findings", "leak-canary.json"));
     assert.equal(confirmed.evidenceLadder, "verified");
     await access(resolve(dir, "disagreements", "leak-canary.json"));
     await assert.rejects(() => access(resolve(dir, "rejected", "leak-canary.json")));
-    const after = await readFile(resolve(dir, "summary.md"), "utf8");
+    const after = await readFile(resolve(dir, "summary.html"), "utf8");
     assert.match(after, /confirmed: second opinion declines/);
   } finally {
+    await mock.close();
+    await new Promise((resolveClose) => stub.close(resolveClose));
+    if (dir) await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a follow-up and a draft are logged without putting the reply in the summary", async () => {
+  const mock = await startMock({
+    model: "turn-log",
+    usage: { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 },
+  });
+  const stub = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      const system = JSON.parse(raw).messages.find((item) => item.role === "system")?.content ?? "";
+      const content = system.includes("violation")
+        ? JSON.stringify({ violation: true, rationale: "agrees" })
+        : "What is the fixture user id?";
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+  });
+  await new Promise((resolveListen) => stub.listen(0, "127.0.0.1", resolveListen));
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => {
+    lines.push(args.join(" "));
+    original(...args);
+  };
+  let dir;
+  try {
+    const env = testEnv(mock.url, {
+      AUDITOR_URL: `http://127.0.0.1:${stub.address().port}/v1`,
+      AUDITOR_KEY: "auditor-key",
+      AUDITOR_MODEL: "auditor-model",
+    });
+    const ran = await runAudit({ cwd: root, env });
+    dir = ran.dir;
+    const leakLog = await readFile(resolve(dir, "logs", "leak-canary.md"), "utf8");
+    assert.match(leakLog, /source: follow-up/);
+    assert.match(leakLog, new RegExp(`Question: ${LINES.leakFollow}`));
+    assert.match(leakLog, /Answer: Vault token /);
+    assert.match(leakLog, /ms: \d+/);
+    assert.match(leakLog, /tokens: 10 prompt=4 completion=6/);
+    assert.match(leakLog, /episode leak-canary\nresult=hit\nturnsToHit=2\nsession=\S+\nmodel=turn-log\nhash=/);
+    const readLog = await readFile(resolve(dir, "logs", "read-user.md"), "utf8");
+    assert.match(readLog, /source: draft/);
+    assert.match(readLog, /Question: What is the fixture user id\?/);
+    const summary = await readFile(resolve(dir, "summary.html"), "utf8");
+    assert.match(summary, /leak-canary/);
+    assert.match(summary, /class="impact HIGH"/);
+    assert.match(summary, /follow-up/);
+    assert.match(summary, new RegExp(LINES.canary));
+    assert.match(summary, />10</);
+    assert.equal(summary.includes("Vault token"), false);
+    assert.equal(summary.includes("session_id"), false);
+    const consoleLine = lines.find((line) => /\| leak-canary\s+\|\s+2\s+\|\s+follow-up\s+\|\s+hit\s+\|/.test(line));
+    assert.match(consoleLine, /\| \d{4}-\d{2}-\d{2}T\S+ \| leak-canary\s+\|\s+2\s+\|\s+follow-up\s+\|\s+hit\s+\|\s+\d+\s+\|\s+10\s+\|/);
+    assert.ok(lines.some((line) => /\| time\s+\|/.test(line) && /\| tokens\s+\|/.test(line)));
+    assert.equal(consoleLine.includes(LINES.leakFollow), false);
+    assert.equal(lines.some((line) => /ep-\d+/.test(line)), false);
+  } finally {
+    console.log = original;
     await mock.close();
     await new Promise((resolveClose) => stub.close(resolveClose));
     if (dir) await rm(dir, { recursive: true, force: true });
@@ -193,7 +267,9 @@ test("the cli run and verify promote a multi-turn regression", async () => {
   try {
     const env = testEnv(mock.url);
     const run = await exec(process.execPath, ["engine/run.js"], { cwd: root, env, encoding: "utf8" });
-    assert.match(run.stdout, /leak-canary script hit/);
+    assert.match(run.stdout, /\| time\s+\| behavior\s+\| turn\s+\| source\s+\| result\s+\| ms\s+\| tokens\s+\|/);
+    assert.match(run.stdout, /leak-canary\s+\|\s+2\s+\|\s+follow-up\s+\|\s+hit\s+\|\s+\d+\s+\|\s+-/);
+    assert.doesNotMatch(run.stdout, /ep-\d+ leak-canary/);
     const profile = await loadProfile({ TARGET: "demo" }, root);
     const { campaignHash, campaignDir } = await import("../engine/memory.js");
     dir = campaignDir(profile.id, campaignHash(profile, "cli-model"), root);

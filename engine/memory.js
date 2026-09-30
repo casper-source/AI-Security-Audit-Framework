@@ -42,6 +42,7 @@ export function campaignDir(profileId, hash, root = process.cwd()) {
  * @param {{ id: string }[]} behaviors
  */
 export async function loadRegister(dir, behaviors) {
+  await mkdir(resolve(dir, "logs"), { recursive: true });
   const file = resolve(dir, "register.json");
   let data = { behaviors: {} };
   try {

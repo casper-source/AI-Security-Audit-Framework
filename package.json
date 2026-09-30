@@ -9,8 +9,13 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "mock": "node targets/demo/mock-server.js",
-    "audit": "node engine/run.js",
-    "verify": "node engine/verify.js"
+    "check": "node engine/cli.js check",
+    "audit": "node engine/cli.js run",
+    "clean": "node engine/cli.js clean",
+    "verify": "node engine/cli.js verify",
+    "status": "node engine/cli.js status",
+    "summary": "node engine/cli.js summary",
+    "logs": "node engine/cli.js logs"
   },
   "dependencies": {
     "yaml": "^2.6.1"

@@ -4,24 +4,47 @@ Local audit harness for a system you are allowed to test. One profile is one eng
 
 This is not a general-purpose attack tool. The engine never contains a product name, a secret, a seed sentence, or an oracle string. Those live only in a target pack under `targets/<id>/`.
 
+## Commands
+
+These npm scripts are the daily controls. `TARGET` in `.env` picks the profile. Shell variables win over `.env`.
+
+```
+npm run check      profile and health check, no turns
+npm run audit      coverage pass
+npm run clean      delete this target's campaigns, then run the coverage pass
+npm run verify     replay candidates
+npm run status     register for this target, no turns
+npm run summary    open summary.html
+npm run logs       open the turn-log folder
+npm run mock       demo target on 127.0.0.1:8787
+npm test           test suite
+```
+
+`node engine/cli.js` prints the same list. The names it accepts are `check`, `run`, `clean`, `verify`, `status`, `summary`, and `logs`. `npm run audit` is `run`.
+
+`npm run clean` deletes `campaigns/<profile.id>/` for the current target, including every hash, and then does what `npm run audit` does. It leaves other targets' campaigns in place. `npm run audit` never deletes.
+
+`npm run check` prints the profile id, the model id from health, the campaign hash, and the campaign directory. `npm run status` prints each behavior's status, pulls, and wins. `npm run summary` and `npm run logs` open the campaign for the live health model. If the target is down, they open the newest local campaign and say so.
+
 ## Run the demo
 
 Install once, then start the in-repo mock. It listens on `127.0.0.1:8787`.
 
 ```
 npm install
-node targets/demo/mock-server.js
+npm run mock
 ```
 
-In a second terminal, copy the example env and run the audit. Shell variables win over `.env`.
+In a second terminal, copy the example env and run the audit. `.env.example` already sets `TARGET=demo`.
 
 ```
 copy .env.example .env
-node engine/run.js
-node engine/verify.js
+npm run audit
+npm run verify
+npm run summary
 ```
 
-`node engine/run.js` writes claimed findings under `campaigns/demo/<hash>/`. `node engine/verify.js` replays them and writes `regression/<behaviorId>.json` for each confirmed behavior. A second run against the same reported model skips behaviors that are already candidate, confirmed, or exhausted. Delete that hash directory to start that model over.
+`npm run audit` writes claimed findings under `campaigns/demo/<hash>/`. `npm run verify` replays them and writes `regression/<behaviorId>.json` for each confirmed behavior. A second audit against the same reported model skips behaviors that are already candidate, confirmed, or exhausted. `npm run clean` removes that target's campaign folders and starts the coverage pass over.
 
 `npm test` runs `node --test test/*.test.js`. Node treats a bare `test/` argument as the directory entry, not as the files inside it, so the glob is the command that runs this suite.
 
@@ -35,7 +58,8 @@ targets/my-target/profile.yaml
 
 ```
 set TARGET=my-target
-node engine/run.js
+npm run check
+npm run audit
 ```
 
 v1 speaks `chat-session` and `chat-history`. Add `targets/<id>/adapter.js` when neither dialect matches, exporting `send`, `health`, and `reset` with the same signatures. If that file exists, `run`, `verify`, and preflight use it instead of the dialect. `targets/mercibank/` is the local lab on `http://localhost:8080`: set `TARGET=mercibank` in `.env`. The campaign hash still uses the model id from `GET /health`, which is the upstream model, not `TARGET_MODEL`.
@@ -114,10 +138,12 @@ A 429, a timeout, or a connection failure is retried up to five times. Any other
 
 ## Campaign files
 
-`campaigns/<profile.id>/<hash>/` holds `register.json`, `journal.md`, `lessons.jsonl`, and `summary.md`. The hash is the first 12 hex characters of SHA-256 over the canonical profile JSON, a newline, and the model id from health. A different model id is a different directory.
+`campaigns/<profile.id>/<hash>/` holds `register.json`, `journal.md`, `lessons.jsonl`, `summary.html`, and `logs/<behaviorId>.md`. The hash is the first 12 hex characters of SHA-256 over the canonical profile JSON, a newline, and the model id from health. A different model id is a different directory.
 
-`findings/<behaviorId>.json` is `claimed`, then `verified`. `rejected/` and `transport/` replace that file. `disagreements/` is an extra copy written only when the rubric boolean disagrees with a deterministic hit. It may name a claimed finding and, after verify, the same finding once it is confirmed. It does not name a rejected or transport file.
+`logs/<behaviorId>.md` is an append-only turn log. Each sent turn records the time, source (`opening`, `follow-up`, or `draft`), duration, token total, the question, the answer, tool calls, and the judge result. A flag whose path is missing is logged as `oracle path missing` and is still a non-hit. The file is not read back to make decisions. `verify.js` appends a replay block for each repetition: the repetition number, the new session id, hit or miss or transport, and whether the transport retry was used.
 
-`summary.md` has five sections, in order: claimed, confirmed, rejected, transport, disagreement.
+`findings/<behaviorId>.json` is `claimed`, then `verified`. `rejected/` and `transport/` replace that file. `disagreements/` is an extra copy written only when the rubric boolean disagrees with a deterministic hit. It may name a claimed finding and, after verify, the same finding once it is confirmed. It does not name a rejected or transport file. A hit also stores `matched`, `ms`, and `tokens` from the hitting turn.
+
+`summary.html` has five sections, in order: claimed, confirmed, rejected, transport, disagreement. Each table has columns index, behavior, goal, impact, evidence, benign, turn, source, matched, ms, and tokens. The index column is the original row order in that section. Click the index or impact header to sort that table; impact orders `CRITICAL`, `HIGH`, `MEDIUM`, then `LOW`, and a second click reverses it. The console results table has the same columns except index. Turn, source, matched, ms, and tokens come from the hitting turn. A row with no hit uses `-`. `verify.js` overwrites `summary.html`.
 
 The regression JSON key order is `comment`, `profileId`, `hash`, `model`, `session`, `turns`, `oracle`. `turns` is an ordered array of user strings. Replay them with the dialect's session mode and assert the oracle. Do not join them into one prompt.

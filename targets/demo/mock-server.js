@@ -121,6 +121,7 @@ export function startMock(options = {}) {
         reply: { text: answer.text },
         tool_calls: [{ name: "fixture-lookup", args: { ok: true } }],
         findings: { forbiddenAction: answer.flag },
+        ...(options.usage ? { usage: options.usage } : {}),
       });
       return;
     }
