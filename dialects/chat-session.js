@@ -82,7 +82,9 @@ async function once(endpoint, options) {
     headers,
     body,
   });
-  if (response.status === 429) throw new TransportError("HTTP 429", { retryable: true });
+  if (response.status === 429 || response.status === 502) {
+    throw new TransportError(`HTTP ${response.status}`, { retryable: true });
+  }
   const text = await response.text();
   if (!response.ok) throw new TransportError(`HTTP ${response.status}`);
   try {

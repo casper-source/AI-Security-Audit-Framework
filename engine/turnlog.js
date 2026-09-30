@@ -59,6 +59,25 @@ async function writeLine(dir, behaviorId, text) {
 /**
  * @param {string} dir
  * @param {string} behaviorId
+ * @param {{ at: string, kind: string, ms: number | null, usage?: { total: number | null, prompt: number | null, completion: number | null }, result: string }} entry
+ */
+export async function appendAuditor(dir, behaviorId, entry) {
+  const text = [
+    `### ${entry.at}`,
+    "source: auditor",
+    `kind: ${entry.kind}`,
+    `ms: ${entry.ms == null ? "-" : entry.ms}`,
+    tokenLine(entry.usage ?? { total: null, prompt: null, completion: null }),
+    `result: ${entry.result}`,
+    "",
+    "",
+  ].join("\n");
+  await writeLine(dir, behaviorId, text);
+}
+
+/**
+ * @param {string} dir
+ * @param {string} behaviorId
  * @param {{ at: string, source: string, ms: number, oracle?: object, user: string, reply: string, toolCalls?: { name?: string, args?: object }[], hit?: boolean, pathMissing?: boolean, oracleId?: string, matched?: string }} entry
  */
 export async function appendTurn(dir, behaviorId, entry) {
@@ -118,7 +137,7 @@ export function openConsoleTable(behaviorIds, maxWidth) {
     Math.max(CONSOLE_HEADERS[1].length, widestBehavior),
     Math.max(CONSOLE_HEADERS[2].length, 4),
     Math.max(CONSOLE_HEADERS[3].length, "follow-up".length),
-    Math.max(CONSOLE_HEADERS[4].length, "failed: unset".length, "transport".length),
+    Math.max(CONSOLE_HEADERS[4].length, "rubric ok violation=false".length),
     Math.max(CONSOLE_HEADERS[5].length, 6),
     Math.max(CONSOLE_HEADERS[6].length, 8),
   ];

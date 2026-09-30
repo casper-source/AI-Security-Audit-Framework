@@ -45,6 +45,76 @@ test("summary has five exclusive sections and keeps disagreement beside a claim"
   assert.doesNotMatch(hidden, /claimed: no/);
 });
 
+test("claimed and transport use the same results column widths", () => {
+  const text = render({
+    claimed: [{
+      behaviorId: "leak-canary",
+      goal: "canary",
+      impact: "HIGH",
+      evidence: "Reply on turn 2 contained a long oracle value.",
+      foundAt: "2026-09-28T12:00:00.000Z",
+    }],
+    confirmed: [],
+    rejected: [],
+    transport: [{ behaviorId: "read-user", goal: "canary", impact: "LOW", evidence: "still open" }],
+    disagreement: [],
+  }, 100);
+  const rules = text.split("\n").filter((line) => line.startsWith("+"));
+  assert.ok(rules.length >= 2);
+  assert.equal(new Set(rules).size, 1);
+  const html = renderHtml({
+    claimed: [{
+      behaviorId: "leak-canary",
+      goal: "canary",
+      impact: "HIGH",
+      evidence: "Reply on turn 2 contained a long oracle value.",
+      foundAt: "2026-09-28T12:00:00.000Z",
+    }],
+    confirmed: [],
+    rejected: [],
+    transport: [{ behaviorId: "read-user", goal: "canary", impact: "LOW", evidence: "still open" }],
+    disagreement: [],
+  });
+  const groups = [...html.matchAll(/<colgroup>(.*?)<\/colgroup>/g)].map((match) => match[1]);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0], groups[1]);
+  const labels = ["index", "behavior", "goal", "impact", "evidence", "benign", "turn", "source", "matched", "ms", "tokens", "hits", "asr"];
+  const widths = [...groups[0].matchAll(/width: (\d+)ch/g)].map((match) => Number(match[1]));
+  assert.equal(widths.length, labels.length);
+  labels.forEach((label, index) => assert.ok(widths[index] >= label.length, label));
+  assert.match(html, /th \{[^}]*white-space: nowrap/);
+  const mins = [...html.matchAll(/<table style="min-width: (\d+)ch">/g)].map((match) => match[1]);
+  assert.deepEqual(mins, [mins[0], mins[0]]);
+  assert.equal(html.includes("max-content"), false);
+});
+
+test("verify results replace ms and tokens with hits and asr", () => {
+  const text = render({
+    confirmed: [{
+      behaviorId: "leak-canary",
+      goal: "canary",
+      impact: "HIGH",
+      evidence: "Reply on turn 2 contained the text oracle.",
+      reproHits: 13,
+      reproRuns: 15,
+      benign: false,
+      turnsToHit: 2,
+      turnSources: ["opening", "follow-up"],
+      matched: "ORACLE",
+      ms: 12,
+      tokens: 10,
+    }],
+    claimed: [],
+    rejected: [],
+    transport: [],
+    disagreement: [],
+  }, undefined, { verify: true });
+  assert.match(text, /matched\s+\|\s+hits\s+\|\s+asr/);
+  assert.match(text, /13\/15\s+\|\s+87%/);
+  assert.doesNotMatch(text, /\|\s+ms\s+\|/);
+  assert.doesNotMatch(text, /\|\s+tokens\s+\|/);
+});
+
 test("a narrow results table wraps evidence inside the cell", () => {
   const evidence = "Reply on turn 2 contained a fairly long oracle value that should wrap.";
   const text = render({
@@ -79,7 +149,7 @@ test("html summary keeps the five sections and escapes evidence", () => {
     claimed: [{ behaviorId: "leak-canary", goal: "canary", impact: "HIGH", evidence: "saw <tag>", foundAt: "2026-09-28T12:00:00.000Z" }],
     confirmed: [
       { behaviorId: "low-one", goal: "canary", impact: "LOW", evidence: "low hit" },
-      { behaviorId: "crit-one", goal: "forbidden", impact: "CRITICAL", evidence: "flag hit" },
+      { behaviorId: "crit-one", goal: "forbidden", impact: "CRITICAL", evidence: "flag hit", reproHits: 13, reproRuns: 15 },
     ],
     rejected: [],
     transport: [],
@@ -93,6 +163,9 @@ test("html summary keeps the five sections and escapes evidence", () => {
   assert.equal(html.includes("<tag>"), false);
   assert.match(html, /<th class="sortable" data-sort="index" tabindex="0">index<\/th>/);
   assert.match(html, /<th class="sortable" data-sort="impact" tabindex="0">impact<\/th>/);
+  assert.match(html, /<th>hits<\/th><th>asr<\/th>/);
+  assert.match(html, /13\/15/);
+  assert.match(html, /87%/);
   assert.match(html, /<tr data-index="1" data-impact="CRITICAL"><td>1<\/td>/);
   assert.match(html, /<tr data-index="2" data-impact="LOW"><td>2<\/td>/);
   assert.match(html, /CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3/);

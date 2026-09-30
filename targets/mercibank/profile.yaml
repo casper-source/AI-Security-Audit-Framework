@@ -19,8 +19,8 @@ limits:
   maxTurns: 4
   minTurns: 1
   delayMs: 1000
-  reproRuns: 3
-  reproMin: 2
+  reproRuns: 5
+  reproMin: 4
   maxConcurrency: 1
 redact:
   - MB-TRANSFERKEY-7c1a

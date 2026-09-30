@@ -3,7 +3,7 @@
 // Must not copy a finding into a second status directory, and must not decide hits.
 
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 /**
@@ -23,7 +23,14 @@ export function stableStringify(value) {
  * @returns {string}
  */
 export function campaignHash(profile, modelId) {
-  const material = `${stableStringify(profile)}\n${modelId}`;
+  const body = profile && typeof profile === "object" ? { ...profile } : profile;
+  if (body?.limits && typeof body.limits === "object") {
+    body.limits = { ...body.limits };
+    delete body.limits.reproRuns;
+    delete body.limits.reproMin;
+    delete body.limits.maxConcurrency;
+  }
+  const material = `${stableStringify(body)}\n${modelId}`;
   return createHash("sha256").update(material).digest("hex").slice(0, 12);
 }
 
@@ -146,6 +153,95 @@ export async function saveFinding(dir, status, finding) {
 export async function listCandidates(dir) {
   const rows = await readDirJson(resolve(dir, "findings"));
   return rows.filter((row) => row.evidenceLadder === "claimed");
+}
+
+/**
+ * Saved audit transcripts. Confirmed, rejected, and transport rows are included so verify can be repeated.
+ * @param {string} dir
+ * @returns {Promise<object[]>}
+ */
+export async function listReplayable(dir) {
+  const [findings, rejected, transport] = await Promise.all([
+    readDirJson(resolve(dir, "findings")),
+    readDirJson(resolve(dir, "rejected")),
+    readDirJson(resolve(dir, "transport")),
+  ]);
+  const byId = new Map();
+  for (const row of [...transport, ...rejected, ...findings]) {
+    if (!row?.behaviorId || !Array.isArray(row.transcript) || row.transcript.length === 0) continue;
+    byId.set(row.behaviorId, row);
+  }
+  return [...byId.values()];
+}
+
+async function campaignModel(dir) {
+  const rows = await readDirJson(resolve(dir, "regression"));
+  for (const row of rows) {
+    if (typeof row.model === "string" && row.model) return row.model;
+  }
+  let names = [];
+  try {
+    names = await readdir(resolve(dir, "logs"));
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    return null;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".md")) continue;
+    const text = await readFile(resolve(dir, "logs", name), "utf8");
+    const found = text.match(/^model=(.+)$/m);
+    if (found) return found[1].trim();
+  }
+  return null;
+}
+
+async function fileExists(file) {
+  try {
+    await readFile(file);
+    return true;
+  } catch (err) {
+    if (err.code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+/**
+ * Keeps an older audit directory when reproduction limits were the only reason its hash changed.
+ * @param {{ id: string }} profile
+ * @param {string} modelId
+ * @param {string} [cwd]
+ * @returns {Promise<{ hash: string, dir: string, movedFrom: string | null }>}
+ */
+export async function adoptCampaign(profile, modelId, cwd = process.cwd()) {
+  const hash = campaignHash(profile, modelId);
+  const dir = campaignDir(profile.id, hash, cwd);
+  if (await fileExists(resolve(dir, "register.json"))) return { hash, dir, movedFrom: null };
+  const parent = resolve(cwd, "campaigns", profile.id);
+  let names = [];
+  try {
+    names = await readdir(parent);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    return { hash, dir, movedFrom: null };
+  }
+  const donors = [];
+  for (const name of names) {
+    if (name === hash || !/^[0-9a-f]{12}$/.test(name)) continue;
+    const donor = resolve(parent, name);
+    if (!(await fileExists(resolve(donor, "register.json")))) continue;
+    if ((await campaignModel(donor)) !== modelId) continue;
+    donors.push({ hash: name, dir: donor });
+  }
+  if (donors.length !== 1) return { hash, dir, movedFrom: null };
+  await mkdir(dirname(dir), { recursive: true });
+  try {
+    await rename(donors[0].dir, dir);
+  } catch (err) {
+    console.log(`audit campaign ${donors[0].hash} is in use; using that folder`);
+    return { hash: donors[0].hash, dir: donors[0].dir, movedFrom: null };
+  }
+  console.log(`moved audit campaign ${donors[0].hash} to ${hash}`);
+  return { hash, dir, movedFrom: donors[0].hash };
 }
 
 /**

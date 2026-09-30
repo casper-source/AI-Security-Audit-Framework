@@ -1,4 +1,4 @@
-# audit-framework
+# AI Security Audit framework
 
 Local audit harness for a system you are allowed to test. One profile is one engagement. The engine schedules behaviors, sends scripted turns through a dialect, and judges them with deterministic oracles. A later process replays candidates and promotes the ones that reproduce.
 
@@ -22,7 +22,7 @@ npm test           test suite
 
 `node engine/cli.js` prints the same list. The names it accepts are `check`, `run`, `clean`, `verify`, `status`, `summary`, and `logs`. `npm run audit` is `run`.
 
-`npm run clean` deletes `campaigns/<profile.id>/` for the current target, including every hash, and then does what `npm run audit` does. It leaves other targets' campaigns in place. `npm run audit` never deletes.
+`npm run clean` deletes `campaigns/<profile.id>/` for the current target, including every hash, and then does what `npm run audit` does. It leaves other targets' campaigns in place. `npm run audit` never deletes. Audit and clean print `target: <TARGET_MODEL>; auditor: <AUDITOR_MODEL>` before the turn log. Verify prints that line, then `reproduction runs: <reproRuns>, min hit to verify: <reproMin>`, then the verify log. An unset model is `-`.
 
 `npm run check` prints the profile id, the model id from health, the campaign hash, and the campaign directory. `npm run status` prints each behavior's status, pulls, and wins. `npm run summary` and `npm run logs` open the campaign for the live health model. If the target is down, they open the newest local campaign and say so.
 
@@ -44,7 +44,7 @@ npm run verify
 npm run summary
 ```
 
-`npm run audit` writes claimed findings under `campaigns/demo/<hash>/`. `npm run verify` replays them and writes `regression/<behaviorId>.json` for each confirmed behavior. A second audit against the same reported model skips behaviors that are already candidate, confirmed, or exhausted. `npm run clean` removes that target's campaign folders and starts the coverage pass over.
+`npm run audit` writes claimed findings under `campaigns/demo/<hash>/`. `npm run verify` replays those transcripts and writes `regression/<behaviorId>.json` for each confirmed behavior. `npm run verify -- recovery-key transfer-unverified` replays only those behaviors, in profile order, and leaves the others untouched. An unknown id stops before any turn. Run verify again after changing `reproRuns` or `reproMin`; it replays the same audit, including findings already confirmed, rejected, or marked transport. Those three limits do not start a new campaign directory. A second audit against the same reported model skips behaviors that are already candidate, confirmed, or exhausted. `npm run clean` removes that target's campaign folders and starts the coverage pass over.
 
 `npm test` runs `node --test test/*.test.js`. Node treats a bare `test/` argument as the directory entry, not as the files inside it, so the glob is the command that runs this suite.
 
@@ -80,7 +80,7 @@ A later exporter can wrap `regression/*.json` as a Promptfoo config. v1 does not
 
 The engine validates the profile, health-checks the target, and hashes the profile plus the reported model id. It then walks behaviors in file order. A hit becomes a claimed finding. A miss becomes exhausted. A transport failure stays open, is journaled, and shows up in the summary as `still open`. It does not write `transport/<id>.json`.
 
-`node engine/verify.js` is a separate process. It replays each candidate on a fresh session, one saved user turn per request. Stateful behaviors reset between repetitions: replay, reset, replay, reset, replay. Confirmation requires `reproMin` hits and no transport failure. The rubric, when it runs, only stores a rationale. It does not promote or reject.
+`node engine/verify.js` is a separate process. It replays each candidate on a fresh session, one saved user turn per request. Stateful behaviors reset between repetitions: replay, reset, replay, reset, replay. Confirmation requires `reproMin` hits and no transport failure. The console verify log has one row per finished repetition, with columns index, behavior, result, hits, ms, and tokens. `hits` is the running total for that behavior. A horizontal rule separates behaviors. A transport retry stays on the same index. Every turn is still written to the behavior log. The rubric, when it runs, only stores a rationale. It does not promote or reject.
 
 The host allowlist is `localhost` and `127.0.0.1`. A profile may only narrow that set. `::1` is rejected. The auditor URL, when `auditor.remote` is false, must use one of those two hostnames.
 
@@ -134,16 +134,16 @@ Both dialects return `{ user, reply, toolCalls, oracle, sessionId }`. `oracle` i
 
 `chat-session` posts `{ message, session_id? }` to `/chat` and sends `session_id` after the first response. `chat-history` posts `{ messages: [{ role, content }] }` and ignores `session_id`. Either body includes `model` only when `TARGET_MODEL` is set. `GET /health` must return `{ ok: true, model: string }`. `reset` posts an empty body to the behavior's reset path.
 
-A 429, a timeout, or a connection failure is retried up to five times. Any other HTTP error, including a 200 with a broken envelope, stops on that attempt. Redirects are not followed.
+A 429, a 502, a timeout, or a connection failure is retried up to five times. Any other HTTP error, including a 200 with a broken envelope, stops on that attempt. Redirects are not followed.
 
 ## Campaign files
 
-`campaigns/<profile.id>/<hash>/` holds `register.json`, `journal.md`, `lessons.jsonl`, `summary.html`, and `logs/<behaviorId>.md`. The hash is the first 12 hex characters of SHA-256 over the canonical profile JSON, a newline, and the model id from health. A different model id is a different directory.
+`campaigns/<profile.id>/<hash>/` holds `register.json`, `journal.md`, `lessons.jsonl`, `summary.html`, and `logs/<behaviorId>.md`. The hash is the first 12 hex characters of SHA-256 over the canonical profile JSON, a newline, and the model id from health. `reproRuns`, `reproMin`, and `maxConcurrency` are left out of that hash. A different model id, or any other profile edit, is a different directory.
 
 `logs/<behaviorId>.md` is an append-only turn log. Each sent turn records the time, source (`opening`, `follow-up`, or `draft`), duration, token total, the question, the answer, tool calls, and the judge result. A flag whose path is missing is logged as `oracle path missing` and is still a non-hit. The file is not read back to make decisions. `verify.js` appends a replay block for each repetition: the repetition number, the new session id, hit or miss or transport, and whether the transport retry was used.
 
 `findings/<behaviorId>.json` is `claimed`, then `verified`. `rejected/` and `transport/` replace that file. `disagreements/` is an extra copy written only when the rubric boolean disagrees with a deterministic hit. It may name a claimed finding and, after verify, the same finding once it is confirmed. It does not name a rejected or transport file. A hit also stores `matched`, `ms`, and `tokens` from the hitting turn.
 
-`summary.html` has five sections, in order: claimed, confirmed, rejected, transport, disagreement. Each table has columns index, behavior, goal, impact, evidence, benign, turn, source, matched, ms, and tokens. The index column is the original row order in that section. Click the index or impact header to sort that table; impact orders `CRITICAL`, `HIGH`, `MEDIUM`, then `LOW`, and a second click reverses it. The console results table has the same columns except index. Turn, source, matched, ms, and tokens come from the hitting turn. A row with no hit uses `-`. `verify.js` overwrites `summary.html`.
+`summary.html` has five sections, in order: claimed, confirmed, rejected, transport, disagreement. Each table has columns index, behavior, goal, impact, evidence, benign, turn, source, matched, ms, tokens, hits, and asr. `hits` is `13/15` after verify, and `asr` is that ratio as a rounded percent. A row that has not been verified uses `-`. The index column is the original row order in that section. Click the index or impact header to sort that table; impact orders `CRITICAL`, `HIGH`, `MEDIUM`, then `LOW`, and a second click reverses it. The audit console results table has the same columns except index. The verify console results table replaces `ms` and `tokens` with `hits` and `asr`: `hits` is `13/15`, and `asr` is that ratio as a rounded percent. Every HTML section table uses the same column widths. Turn, source, matched, ms, and tokens come from the hitting turn. A row with no hit uses `-`. `verify.js` overwrites `summary.html`.
 
 The regression JSON key order is `comment`, `profileId`, `hash`, `model`, `session`, `turns`, `oracle`. `turns` is an ordered array of user strings. Replay them with the dialect's session mode and assert the oracle. Do not join them into one prompt.

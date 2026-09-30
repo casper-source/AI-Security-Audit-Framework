@@ -12,6 +12,17 @@ const BACKOFF_MS = [200, 400, 800, 1600, 3200];
 const MAX_RETRIES = 5;
 const DEFAULT_MODEL = "merci-assistant";
 
+function httpFailure(status, text) {
+  let detail = "";
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed?.error?.message === "string" && parsed.error.message.length > 0) detail = `: ${parsed.error.message}`;
+  } catch {
+    detail = "";
+  }
+  return `HTTP ${status}${detail}`;
+}
+
 function causedByConnection(err) {
   if (!err || typeof err !== "object") return false;
   if (err.name === "TimeoutError" || err.name === "AbortError") return true;
@@ -36,7 +47,8 @@ async function once(endpoint, options) {
   });
   if (response.status === 429) throw new TransportError("HTTP 429", { retryable: true });
   const text = await response.text();
-  if (!response.ok) throw new TransportError(`HTTP ${response.status}`);
+  if (response.status === 502) throw new TransportError(httpFailure(response.status, text), { retryable: true });
+  if (!response.ok) throw new TransportError(httpFailure(response.status, text));
   try {
     return JSON.parse(text);
   } catch {
@@ -70,6 +82,7 @@ export async function health(options) {
   if (!payload || payload.ok !== true || typeof payload.model !== "string" || payload.model.length === 0) {
     throw new TransportError("broken envelope");
   }
+  if (payload.hasKey === false) throw new TransportError("model key is unset");
   return { ok: true, model: payload.model };
 }
 

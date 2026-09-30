@@ -122,6 +122,18 @@ test("redirects are not followed", { timeout: 3000 }, async () => {
   }
 });
 
+test("a 502 is retried into a completed turn", async () => {
+  const mock = await startMock({ model: "dialect-502" });
+  try {
+    mock.failChat(1, 502);
+    const turn = await sendSession({ url: mock.url, allowHosts, user: LINES.readOpening });
+    assert.equal(typeof turn.reply, "string");
+    assert.equal(mock.requests.length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("repeated 429 becomes TransportError", { timeout: 20_000 }, async () => {
   const mock = await startMock({ model: "dialect-exhaust" });
   try {

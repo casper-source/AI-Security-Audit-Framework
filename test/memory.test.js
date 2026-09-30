@@ -2,10 +2,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { access, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { campaignDir, campaignHash, listCandidates, saveFinding } from "../engine/memory.js";
+import { adoptCampaign, campaignDir, campaignHash, listCandidates, listReplayable, saveFinding } from "../engine/memory.js";
 import { applyEnvText } from "../engine/run.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -16,6 +17,54 @@ test("hash sorts object keys and keeps array order", () => {
   assert.equal(campaignHash(left, "model-a"), campaignHash(right, "model-a"));
   assert.notEqual(campaignHash(left, "model-a"), campaignHash(left, "model-b"));
   assert.equal(campaignHash(left, "model-a").length, 12);
+  const base = { id: "demo", limits: { maxTurns: 4, reproRuns: 3, reproMin: 2, maxConcurrency: 1 } };
+  const tuned = { id: "demo", limits: { maxTurns: 4, reproRuns: 50, reproMin: 40, maxConcurrency: 8 } };
+  const longer = { id: "demo", limits: { maxTurns: 5, reproRuns: 3, reproMin: 2, maxConcurrency: 1 } };
+  assert.equal(campaignHash(base, "model"), campaignHash(tuned, "model"));
+  assert.notEqual(campaignHash(base, "model"), campaignHash(longer, "model"));
+  assert.equal(base.limits.reproRuns, 3);
+});
+
+test("adopt moves the only older audit folder onto the current hash", async () => {
+  const cwd = await mkdtemp(resolve(tmpdir(), "audit-adopt-"));
+  const profile = { id: "adopt-fixture", limits: { maxTurns: 1, reproRuns: 9, reproMin: 4, maxConcurrency: 1 } };
+  const old = campaignDir(profile.id, "aaaaaaaaaaaa", cwd);
+  await mkdir(resolve(old, "regression"), { recursive: true });
+  await writeFile(resolve(old, "register.json"), "{}\n");
+  await writeFile(resolve(old, "regression", "one.json"), "{\"model\":\"model\"}\n");
+  try {
+    const placed = await adoptCampaign(profile, "model", cwd);
+    assert.equal(placed.movedFrom, "aaaaaaaaaaaa");
+    assert.equal(placed.hash, campaignHash(profile, "model"));
+    await access(resolve(placed.dir, "register.json"));
+    await assert.rejects(() => access(old));
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("listReplayable returns confirmed and rejected transcripts", async () => {
+  const dir = campaignDir("replay-fixture", "replaytest01", root);
+  const transcript = [{ user: "hello", reply: "there" }];
+  try {
+    await saveFinding(dir, "CONFIRMED", {
+      behaviorId: "kept",
+      goal: "canary",
+      evidenceLadder: "verified",
+      transcript,
+    });
+    await saveFinding(dir, "REJECTED", {
+      behaviorId: "missed",
+      goal: "canary",
+      evidenceLadder: "claimed",
+      transcript,
+      rejection_reason: "1/3 hits, bar 3",
+    });
+    const ids = (await listReplayable(dir)).map((row) => row.behaviorId).sort();
+    assert.deepEqual(ids, ["kept", "missed"]);
+  } finally {
+    await rm(resolve(root, "campaigns", "replay-fixture"), { recursive: true, force: true });
+  }
 });
 
 test("confirm keeps a disagreement copy and reject removes it", async () => {

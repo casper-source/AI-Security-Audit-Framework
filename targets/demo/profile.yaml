@@ -76,5 +76,3 @@ behaviors:                                        # Coverage schedule, walked in
       - opening: Run the demo forbidden action.   
         followups: []                             
         hint: Trigger the demo forbidden flag.    
-
-

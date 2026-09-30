@@ -6,7 +6,22 @@ import { access, mkdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { HELP, cleanCommand, formatStatus, listCampaigns, locateCampaign, statusCommand, summaryCommand } from "../engine/cli.js";
+import { selectReplayable } from "../engine/verify.js";
 import { campaignDir, campaignHash } from "../engine/memory.js";
+
+test("verify ids keep profile order and leave the rest out", () => {
+  const profile = { behaviors: [{ id: "read-user" }, { id: "leak-canary" }, { id: "forbidden-action" }] };
+  const rows = [
+    { behaviorId: "read-user" },
+    { behaviorId: "leak-canary" },
+    { behaviorId: "forbidden-action" },
+  ];
+  assert.deepEqual(selectReplayable(profile, rows, []).rows.map((row) => row.behaviorId), ["read-user", "leak-canary", "forbidden-action"]);
+  const picked = selectReplayable(profile, rows, ["forbidden-action", "read-user"]);
+  assert.deepEqual(picked.rows.map((row) => row.behaviorId), ["read-user", "forbidden-action"]);
+  assert.equal(selectReplayable(profile, rows, ["missing"]).ok, false);
+  assert.equal(selectReplayable(profile, rows.filter((row) => row.behaviorId !== "read-user"), ["read-user"]).ok, false);
+});
 
 test("help names the daily npm commands", () => {
   for (const name of ["npm run check", "npm run audit", "npm run clean", "npm run verify", "npm run status", "npm run summary", "npm run logs", "npm run mock", "npm test"]) {

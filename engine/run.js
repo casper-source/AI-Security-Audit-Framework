@@ -10,13 +10,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parse } from "yaml";
 import { draft } from "./drafter.js";
 import { assessTurn, judge } from "./judge.js";
-import { campaignDir, campaignHash, journal, lesson, loadRegister, saveFinding, saveRegister } from "./memory.js";
+import { adoptCampaign, journal, lesson, loadRegister, saveFinding, saveRegister } from "./memory.js";
 import { nextBehavior } from "./planner.js";
 import { loadTransport, preflight } from "./preflight.js";
 import { banner, consoleWidth } from "./box.js";
 import { loadBuckets, render, renderHtml, writeSummary } from "./report.js";
 import { secondOpinion } from "./rubric.js";
-import { appendEpisode, appendTurn, closeConsoleTable, consoleTableRow, consoleTurn, openConsoleTable, readUsage } from "./turnlog.js";
+import { appendAuditor, appendEpisode, appendTurn, closeConsoleTable, consoleTableRow, consoleTurn, openConsoleTable, readUsage } from "./turnlog.js";
 
 /**
  * @param {string} text
@@ -126,6 +126,21 @@ async function runEpisode(ctx) {
   const limits = profile.limits;
   const key = env[profile.env.targetKey] || undefined;
   const model = env[profile.env.targetModel] || undefined;
+  const logAuditor = async (kind, result, outcome) => {
+    const at = new Date().toISOString();
+    const ms = Number.isFinite(outcome?.ms) ? outcome.ms : null;
+    const usage = outcome?.usage ?? { total: null, prompt: null, completion: null };
+    logRow([
+      at,
+      behavior.id,
+      "\u00b7",
+      "auditor",
+      result,
+      ms == null ? "-" : String(ms),
+      usage.total == null ? "-" : String(usage.total),
+    ]);
+    await appendAuditor(dir, behavior.id, { at, kind, ms, usage, result });
+  };
 
   const closeEpisode = (result, turnsToHit) =>
     appendEpisode(dir, behavior.id, {
@@ -150,13 +165,10 @@ async function runEpisode(ctx) {
       try {
         drafted = await draft({ behavior, transcript: turns.map(viewTurn), auditor });
       } catch (err) {
-        logRow([new Date().toISOString(), behavior.id, "-", "draft", `failed: ${err.message}`, "-", "-"]);
-        break;
+        drafted = { ok: false, reason: err.message || "auditor request failed" };
       }
-      if (!drafted.ok) {
-        logRow([new Date().toISOString(), behavior.id, "-", "draft", `failed: ${drafted.reason}`, "-", "-"]);
-        break;
-      }
+      await logAuditor("draft", drafted.ok ? "draft ok" : `draft failed: ${drafted.reason}`, drafted);
+      if (!drafted.ok) break;
       user = drafted.message;
       source = "draft";
     }
@@ -176,7 +188,8 @@ async function runEpisode(ctx) {
     } catch (err) {
       if (err.name !== "TransportError") throw err;
       // A transport failure is not a miss, so the register stays open.
-      logRow([new Date().toISOString(), behavior.id, "-", "-", "transport", "-", "-"]);
+      const reason = typeof err.message === "string" && err.message.length > 0 ? err.message : "transport";
+      logRow([new Date().toISOString(), behavior.id, "-", "-", reason, "-", "-"]);
       await closeEpisode("transport");
       await journal(dir, behavior.id, "transport");
       return {
@@ -186,7 +199,7 @@ async function runEpisode(ctx) {
           goal: behavior.goal,
           impact: behavior.impact,
           benign: behavior.benignOf === null,
-          evidence: "still open",
+          evidence: `still open: ${reason}`,
           foundAt: new Date().toISOString(),
         },
       };
@@ -253,7 +266,10 @@ async function runEpisode(ctx) {
     } catch (err) {
       opinion = { available: false, reason: err.message };
     }
-    if (opinion.reason) console.log(`rubric ${behavior.id}: ${opinion.reason}`);
+    if (opinion.available || opinion.reason) {
+      const result = opinion.available ? `rubric ok violation=${opinion.violation}` : `rubric failed: ${opinion.reason}`;
+      await logAuditor("rubric", result, opinion);
+    }
     if (opinion.available) {
       finding.rationale = opinion.rationale;
       finding.rubricViolation = opinion.violation;
@@ -296,12 +312,16 @@ export async function main(options = {}) {
   const profile = await loadProfile(env, cwd);
   const checked = await preflight(profile, env, cwd);
   if (!checked.ok) throw fatal(checked.errors.join("; "));
-  const hash = campaignHash(profile, checked.modelId);
-  const dir = campaignDir(profile.id, hash, cwd);
+  const placed = await adoptCampaign(profile, checked.modelId, cwd);
+  const hash = placed.hash;
+  const dir = placed.dir;
   const register = await loadRegister(dir, profile.behaviors);
   // targets/<id>/adapter.js replaces the dialect when the folder ships one.
   const dialect = await loadTransport(profile, env, cwd);
   const auditor = auditorConfig(profile, env);
+  const targetModel = env[profile.env.targetModel] || "-";
+  const auditorModel = auditor.model || "-";
+  console.log(`target: ${targetModel}; auditor: ${auditorModel}`);
   const openTransport = [];
   const deferred = new Set();
   let episode = 0;

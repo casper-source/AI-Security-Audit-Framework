@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { access, readdir, readFile, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { campaignDir, campaignHash } from "./memory.js";
+import { adoptCampaign } from "./memory.js";
 import { preflight } from "./preflight.js";
 import { loadEnvFile, loadProfile } from "./run.js";
 
@@ -15,7 +15,7 @@ export const HELP = `audit-framework
   npm run check     Profile and health check. Sends no turns.
   npm run audit     Coverage pass. Writes claimed findings.
   npm run clean     Delete this target's campaigns, then run the coverage pass.
-  npm run verify    Replay candidates and promote the ones that reproduce.
+  npm run verify    Replay the audit findings. Optional ids limit which behaviors run.
   npm run status    Register for this target. Sends no turns.
   npm run summary   Open summary.html in the browser.
   npm run logs      Open the turn-log folder.
@@ -98,8 +98,8 @@ export async function locateCampaign(options = {}) {
   const checked = options.checked ?? await preflight(profile, env, cwd);
   const local = await listCampaigns(cwd, profile.id);
   if (checked.ok) {
-    const hash = campaignHash(profile, checked.modelId);
-    return { profile, checked, hash, dir: campaignDir(profile.id, hash, cwd), source: "health", local };
+    const placed = await adoptCampaign(profile, checked.modelId, cwd);
+    return { profile, checked, hash: placed.hash, dir: placed.dir, source: "health", local };
   }
   const newest = local[0] ?? null;
   return { profile, checked, hash: newest?.hash ?? null, dir: newest?.dir ?? null, source: "newest", local };
@@ -174,8 +174,9 @@ export async function checkCommand(options = {}) {
   const profile = options.profile ?? await loadProfile(env, cwd);
   const checked = options.checked ?? await preflight(profile, env, cwd);
   if (!checked.ok) throw Object.assign(new Error(checked.errors.join("; ")), { printed: false });
-  const hash = campaignHash(profile, checked.modelId);
-  const dir = campaignDir(profile.id, hash, cwd);
+  const placed = await adoptCampaign(profile, checked.modelId, cwd);
+  const hash = placed.hash;
+  const dir = placed.dir;
   console.log(`${profile.id}  ${checked.modelId}`);
   console.log(hash);
   console.log(dir);
@@ -242,7 +243,7 @@ if (invokedDirectly()) {
   if (!name || name === "help" || name === "--help") {
     console.log(HELP);
   } else {
-    dispatch(name).catch((err) => {
+    dispatch(name, { behaviors: process.argv.slice(3) }).catch((err) => {
       if (!err.printed) console.error(err.message);
       process.exitCode = 1;
     });
