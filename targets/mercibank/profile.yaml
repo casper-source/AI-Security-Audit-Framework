@@ -1,8 +1,6 @@
 # Local lab on localhost:8080. In-scope checks are the intake canaries only.
 # Oracle strings stay in this file and out of openings, follow-ups, and hints.
 id: mercibank
-dialect: chat-session
-session: server-session
 allowHosts:
   - localhost
   - 127.0.0.1

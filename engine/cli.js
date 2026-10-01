@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // User-facing commands. Each one calls one engine file or opens one campaign path.
 // Status and summary do not send turns. A live health check picks the campaign hash.
 // Must not confirm a finding, and must not put a secret on the command line.
@@ -5,22 +6,33 @@
 import { spawn } from "node:child_process";
 import { access, readdir, readFile, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { parseArgs } from "./args.js";
+import { invokedDirectly } from "./entry.js";
 import { adoptCampaign } from "./memory.js";
 import { preflight } from "./preflight.js";
 import { loadEnvFile, loadProfile } from "./run.js";
 
 export const HELP = `audit-framework
 
-  npm run check     Profile and health check. Sends no turns.
-  npm run audit     Coverage pass. Writes claimed findings.
-  npm run clean     Delete this target's campaigns, then run the coverage pass.
-  npm run verify    Replay the audit findings. Optional ids limit which behaviors run.
-  npm run status    Register for this target. Sends no turns.
-  npm run summary   Open summary.html in the browser.
-  npm run logs      Open the turn-log folder.
-  npm run mock      Demo target on 127.0.0.1:8787.
-  npm test          Test suite.
+  audit check                         Profile and health check. Sends no turns.
+  audit run                           Coverage pass. Resumes the active campaign.
+  audit run --fresh                   Archive the active campaign and start a new folder.
+  audit clean                         Delete this target's campaign folders. Does not run.
+  audit verify [id ...]               Replay the active campaign. Optional ids limit behaviors.
+  audit verify --campaign <folder>    Replay that folder, including an archived one.
+  audit status [--campaign <folder>]  Register. Sends no turns.
+  audit summary [--campaign <folder>] Open summary.html.
+  audit logs [--campaign <folder>]    Open the turn-log folder.
+
+  npm run check      Same as audit check.
+  npm run audit      Same as audit run. npm run audit -- --fresh starts a new folder.
+  npm run clean      Same as audit clean.
+  npm run verify     Same as audit verify. npm run verify -- --campaign <folder> <id>
+  npm run status     Register for this target. Sends no turns.
+  npm run summary    Open summary.html in the browser.
+  npm run logs       Open the turn-log folder.
+  npm run mock       Demo target on 127.0.0.1:8787.
+  npm test           Test suite.
 
 node engine/cli.js accepts check, run, clean, verify, status, summary, and logs.
 `;
@@ -66,7 +78,53 @@ export async function listCampaigns(root, profileId) {
         if (err.code !== "ENOENT") throw err;
       }
     }
-    if (mtime > 0) found.push({ hash: entry.name, dir, mtime });
+    if (mtime === 0) continue;
+    let hash = entry.name;
+    try {
+      const data = JSON.parse(await readFile(resolve(dir, "campaign.json"), "utf8"));
+      if (typeof data.hash === "string" && data.hash) hash = data.hash;
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    found.push({ hash, dir, mtime });
+  }
+  found.sort((left, right) => right.mtime - left.mtime || left.hash.localeCompare(right.hash));
+  return found;
+}
+
+/**
+ * @param {string} root
+ * @param {string} profileId
+ * @returns {Promise<{ hash: string, dir: string, mtime: number }[]>}
+ */
+export async function listSummaryCampaigns(root, profileId) {
+  const base = resolve(root, "campaigns", profileId);
+  let names;
+  try {
+    names = await readdir(base, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return [];
+    throw err;
+  }
+  const found = [];
+  for (const entry of names) {
+    if (!entry.isDirectory()) continue;
+    const dir = resolve(base, entry.name);
+    let mtime;
+    try {
+      mtime = (await stat(resolve(dir, "summary.html"))).mtimeMs;
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    let hash = entry.name;
+    try {
+      const data = JSON.parse(await readFile(resolve(dir, "campaign.json"), "utf8"));
+      if (typeof data.hash === "string" && data.hash) hash = data.hash;
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    found.push({ hash, dir, mtime });
   }
   found.sort((left, right) => right.mtime - left.mtime || left.hash.localeCompare(right.hash));
   return found;
@@ -97,9 +155,10 @@ export async function locateCampaign(options = {}) {
   const profile = options.profile ?? await loadProfile(env, cwd);
   const checked = options.checked ?? await preflight(profile, env, cwd);
   const local = await listCampaigns(cwd, profile.id);
-  if (checked.ok) {
-    const placed = await adoptCampaign(profile, checked.modelId, cwd);
-    return { profile, checked, hash: placed.hash, dir: placed.dir, source: "health", local };
+  if (options.campaign || checked.ok) {
+    const placed = await adoptCampaign(profile, checked.modelId || "", cwd, { campaign: options.campaign || undefined });
+    const source = options.campaign ? "named" : "health";
+    return { profile, checked, hash: placed.hash, dir: placed.dir, source, local };
   }
   const newest = local[0] ?? null;
   return { profile, checked, hash: newest?.hash ?? null, dir: newest?.dir ?? null, source: "newest", local };
@@ -118,14 +177,38 @@ async function exists(file) {
 function healthNote(found) {
   if (found.source !== "newest") return;
   console.error(`Target health check failed: ${found.checked.errors.join("; ")}`);
-  console.error("Using the newest local campaign.");
+  console.error("Using the most recently updated summary.html.");
+}
+
+/**
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv | Record<string, string | undefined>, profile?: object, checked?: { ok: boolean, errors: string[], modelId: string | null }, campaign?: string }} [options]
+ */
+async function locateSummaryCampaign(options = {}) {
+  const cwd = options.cwd ?? process.cwd();
+  const env = options.env ?? loadEnvFile(cwd);
+  const profile = options.profile ?? await loadProfile(env, cwd);
+  const checked = options.checked ?? await preflight(profile, env, cwd);
+  if (options.campaign) {
+    const placed = await adoptCampaign(profile, checked.modelId || "", cwd, { campaign: options.campaign });
+    return { profile, checked, hash: placed.hash, dir: placed.dir, source: "named" };
+  }
+  const local = await listSummaryCampaigns(cwd, profile.id);
+  const newest = local[0] ?? null;
+  return {
+    profile,
+    checked,
+    hash: newest?.hash ?? null,
+    dir: newest?.dir ?? null,
+    source: newest && !checked.ok ? "newest" : "summary",
+    local,
+  };
 }
 
 /**
  * @param {{ cwd?: string, env?: NodeJS.ProcessEnv | Record<string, string | undefined>, profile?: object, checked?: { ok: boolean, errors: string[], modelId: string | null }, open?: (file: string) => Promise<void> }} [options]
  */
 export async function summaryCommand(options = {}) {
-  const found = await locateCampaign(options);
+  const found = await locateSummaryCampaign(options);
   if (!found.dir) throw new Error(`No campaign for ${found.profile.id}. npm run audit`);
   const file = resolve(found.dir, "summary.html");
   if (!(await exists(file))) throw new Error(`No summary.html for ${found.profile.id} ${found.hash}. npm run audit`);
@@ -198,7 +281,8 @@ export async function removeCampaigns(root, profileId) {
 }
 
 /**
- * @param {{ cwd?: string, env?: NodeJS.ProcessEnv | Record<string, string | undefined>, profile?: { id: string }, run?: (options: object) => Promise<unknown> }} [options]
+ * Deletes this target's campaign folders and does not start a run.
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv | Record<string, string | undefined>, profile?: { id: string } }} [options]
  */
 export async function cleanCommand(options = {}) {
   const cwd = options.cwd ?? process.cwd();
@@ -206,9 +290,7 @@ export async function cleanCommand(options = {}) {
   const profile = options.profile ?? await loadProfile(env, cwd);
   const dir = await removeCampaigns(cwd, profile.id);
   console.log(`Removed ${dir}`);
-  if (options.run) return options.run(options);
-  const { main } = await import("./run.js");
-  return main(options);
+  return { ok: true, dir };
 }
 
 /**
@@ -216,6 +298,10 @@ export async function cleanCommand(options = {}) {
  * @param {{ cwd?: string, env?: NodeJS.ProcessEnv | Record<string, string | undefined>, open?: (file: string) => Promise<void> }} [options]
  */
 export async function dispatch(name, options = {}) {
+  if (options.fresh && name !== "run") throw new Error("--fresh is only valid for run");
+  const named = name === "verify" || name === "status" || name === "summary" || name === "logs";
+  if (options.campaign && !named) throw new Error("--campaign is only valid for verify, status, summary, and logs");
+  if ((options.behaviors ?? []).length > 0 && name !== "verify") throw new Error(`unexpected argument: ${options.behaviors[0]}`);
   if (name === "check") return checkCommand(options);
   if (name === "run") {
     const { main } = await import("./run.js");
@@ -232,18 +318,18 @@ export async function dispatch(name, options = {}) {
   throw new Error(`Unknown command: ${name || "(none)"}\n${HELP}`);
 }
 
-function invokedDirectly() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (invokedDirectly()) {
-  const name = process.argv[2];
-  if (!name || name === "help" || name === "--help") {
+if (invokedDirectly(import.meta.url)) {
+  let parsed;
+  try {
+    parsed = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  if (!parsed?.name || parsed.name === "help" || parsed.name === "--help") {
     console.log(HELP);
   } else {
-    dispatch(name, { behaviors: process.argv.slice(3) }).catch((err) => {
+    dispatch(parsed.name, { fresh: parsed.fresh, campaign: parsed.campaign, behaviors: parsed.behaviors }).catch((err) => {
       if (!err.printed) console.error(err.message);
       process.exitCode = 1;
     });

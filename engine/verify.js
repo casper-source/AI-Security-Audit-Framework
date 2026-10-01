@@ -4,9 +4,10 @@
 
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { invokedDirectly } from "./entry.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { assessTurn, judge } from "./judge.js";
+import { parseFlags } from "./args.js";
 import { adoptCampaign, journal, listReplayable, loadRegister, saveFinding, saveRegister } from "./memory.js";
 import { loadTransport, preflight } from "./preflight.js";
 import { promote } from "./promote.js";
@@ -29,6 +30,9 @@ function oracleDescriptor(oracle) {
 
 const VERIFY_HEADERS = ["index", "behavior", "result", "hits", "ms", "tokens"];
 
+// Accepts the behavior ids used to size the name column, the reproduction run count, and an optional console width.
+// Builds the verify-log header: index, behavior, result, hits, ms, tokens. The behavior column shrinks first when the console is narrow.
+// Returns { widths, lines } for that header and its rules.
 function openVerifyTable(behaviorIds, runs, maxWidth) {
   const widestBehavior = behaviorIds.reduce((max, id) => Math.max(max, String(id).length), 0);
   const runDigits = String(runs).length;
@@ -45,6 +49,9 @@ function openVerifyTable(behaviorIds, runs, maxWidth) {
   return { widths, lines: [rule, paintRow(VERIFY_HEADERS, widths), rule] };
 }
 
+// Accepts how many tasks to run, the concurrency cap, and a task called with a zero-based index.
+// Runs up to limit tasks at once and stores each result under its own index, so a later finish does not reorder them.
+// Returns the results array after every task settles.
 async function pool(count, limit, task) {
   const results = new Array(count);
   let cursor = 0;
@@ -59,13 +66,10 @@ async function pool(count, limit, task) {
   return results;
 }
 
-/**
- * Keeps profile order. An empty id list replays every saved transcript.
- * @param {{ behaviors: { id: string }[] }} profile
- * @param {object[]} replayable
- * @param {string[]} [ids]
- * @returns {{ ok: true, rows: object[] } | { ok: false, error: string }}
- */
+// Accepts the profile, saved audit transcripts already in profile order, and optional behavior ids.
+// An empty id list keeps every transcript. A named id must exist on the profile and have a transcript. Duplicates are dropped. 
+// The kept rows stay in profile order.
+// Returns { ok: true, rows } or { ok: false, error }.
 export function selectReplayable(profile, replayable, ids = []) {
   const requested = [];
   for (const id of ids) {
@@ -83,20 +87,21 @@ export function selectReplayable(profile, replayable, ids = []) {
   return { ok: true, rows: replayable.filter((row) => wanted.has(row.behaviorId)) };
 }
 
-/**
- * @param {{ env?: NodeJS.ProcessEnv | Record<string, string | undefined>, cwd?: string, behaviors?: string[] }} [options]
- */
+// Accepts optional { env, cwd, behaviors, campaign }. Defaults are .env and process.cwd(). behaviors limits which findings are replayed. campaign names a folder, including an archived one.
+// Replays each saved user turn on a fresh session. Confirms when hits reach reproMin and transport is clear. 
+// Otherwise rejects, or files transport after one retry. Writes summary.html and prints the verify results table.
+// Returns { ok: true, dir, hash, modelId }. A failed preflight or a bad behavior id throws the printed fatal error.
 export async function main(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? loadEnvFile(cwd);
   const profile = await loadProfile(env, cwd);
   const checked = await preflight(profile, env, cwd);
   if (!checked.ok) throw fatal(checked.errors.join("; "));
-  const placed = await adoptCampaign(profile, checked.modelId, cwd);
+  const placed = await adoptCampaign(profile, checked.modelId, cwd, { campaign: options.campaign || undefined });
   const hash = placed.hash;
   const dir = placed.dir;
   const register = await loadRegister(dir, profile.behaviors);
-  const dialect = await loadTransport(profile, env, cwd);
+  const transport = await loadTransport(profile, env, cwd);
   const order = new Map(profile.behaviors.map((behavior, index) => [behavior.id, index]));
   const replayable = (await listReplayable(dir)).sort(
     (left, right) => (order.get(left.behaviorId) ?? 0) - (order.get(right.behaviorId) ?? 0),
@@ -117,6 +122,8 @@ export async function main(options = {}) {
 
   let verifyWidths = null;
   let lastBehavior = null;
+  // Accepts the behavior id and one console row as cell strings.
+  // Draws a rule when the behavior changes, then prints the row.
   const logVerifyRow = (behaviorId, cells) => {
     if (lastBehavior !== null && behaviorId !== lastBehavior) console.log(ruleLine(verifyWidths));
     lastBehavior = behaviorId;
@@ -143,6 +150,10 @@ export async function main(options = {}) {
     const oracle = profile.oracles.find((item) => item.id === behavior.goal);
     const runs = profile.limits.reproRuns;
 
+    // Accepts the zero-based repetition index.
+    // Replays each saved user turn as its own request. A stateful behavior resets before every repetition after the first. 
+    // Sums ms and tokens. A throw carries verifyMs and verifyTokens for the turns already sent.
+    // Returns { status: "hit" | "miss", sessionId, ms, tokens }.
     const oneRep = async (index) => {
       let totalMs = 0;
       let totalTokens = 0;
@@ -150,7 +161,7 @@ export async function main(options = {}) {
       try {
         if (behavior.stateful && index > 0) {
           const started = Date.now();
-          await dialect.reset({ url, allowHosts: profile.allowHosts, key, path: behavior.reset.path });
+          await transport.reset({ url, allowHosts: profile.allowHosts, key, path: behavior.reset.path });
           totalMs += Date.now() - started;
         }
         let sessionId;
@@ -162,7 +173,7 @@ export async function main(options = {}) {
           const started = Date.now();
           let turn;
           try {
-            turn = await dialect.send({
+            turn = await transport.send({
               url,
               allowHosts: profile.allowHosts,
               key,
@@ -216,6 +227,9 @@ export async function main(options = {}) {
       }
     };
 
+    // Accepts the zero-based repetition, its result, the new session id, and whether the transport retry was used.
+    // Appends one replay line to the behavior log. Does not print a console row.
+    // Returns the append promise.
     const noteReplay = (index, result, sessionId, retried) =>
       appendReplay(dir, finding.behaviorId, {
         rep: index + 1,
@@ -227,6 +241,10 @@ export async function main(options = {}) {
     const finished = new Map();
     let nextIndex = 0;
     let hitsSoFar = 0;
+    // Accepts a finished repetition index and { status, ms, tokens }.
+    // Holds the row until every earlier index has printed, so parallel repetitions stay in order. 
+    // hits is the running hit count after that row.
+    // Returns nothing.
     const emit = (index, outcome) => {
       finished.set(index, outcome);
       while (finished.has(nextIndex)) {
@@ -245,6 +263,10 @@ export async function main(options = {}) {
       }
     };
 
+    // Accepts the zero-based repetition index.
+    // Runs oneRep. On TransportError, runs that repetition once more. A second transport failure is recorded as transport. 
+    // Either way, one console row is emitted for the index.
+    // Returns "hit", "miss", or "transport".
     const replayWithRetry = async (index) => {
       try {
         const done = await oneRep(index);
@@ -282,9 +304,9 @@ export async function main(options = {}) {
         })()
       : await pool(runs, profile.limits.maxConcurrency, replayWithRetry);
     const hits = outcomes.filter((item) => item === "hit").length;
-    const transport = outcomes.filter((item) => item === "transport").length;
+    const transportCount = outcomes.filter((item) => item === "transport").length;
     const scored = { ...finding, reproHits: hits, reproRuns: runs };
-    if (transport > 0) {
+    if (transportCount > 0) {
       await saveFinding(dir, "TRANSPORT", scored);
       await releaseFinding(dir, register, finding.behaviorId);
       await journal(dir, finding.behaviorId, "transport");
@@ -300,7 +322,6 @@ export async function main(options = {}) {
         profileId: profile.id,
         hash,
         model: checked.modelId,
-        session: profile.session,
         turns: finding.transcript.map((turn) => turn.user),
         oracle: oracleDescriptor(oracle),
       });
@@ -330,6 +351,9 @@ export async function main(options = {}) {
   return { ok: true, dir, hash, modelId: checked.modelId };
 }
 
+// Accepts the campaign directory, the register, and a behavior id.
+// If that behavior was confirmed, sets it back to candidate and saves the register. Deletes its regression file either way.
+// Returns a promise that settles when both are done.
 async function releaseFinding(dir, register, behaviorId) {
   const row = register.behaviors[behaviorId];
   if (row?.status === "confirmed") {
@@ -339,15 +363,21 @@ async function releaseFinding(dir, register, behaviorId) {
   await rm(resolve(dir, "regression", `${behaviorId}.json`), { force: true });
 }
 
-function invokedDirectly() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (invokedDirectly()) {
-  main({ behaviors: process.argv.slice(2) }).catch((err) => {
-    if (!err.printed) console.error(err.message);
+if (invokedDirectly(import.meta.url)) {
+  let parsed;
+  try {
+    parsed = parseFlags(process.argv.slice(2));
+  } catch (err) {
+    console.error(err.message);
     process.exit(1);
-  });
+  }
+  if (parsed?.fresh) {
+    console.error("--fresh is only valid for run");
+    process.exit(1);
+  } else if (parsed) {
+    main({ behaviors: parsed.behaviors, campaign: parsed.campaign }).catch((err) => {
+      if (!err.printed) console.error(err.message);
+      process.exit(1);
+    });
+  }
 }

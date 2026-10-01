@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { invokedDirectly } from "./entry.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parse } from "yaml";
 import { draft } from "./drafter.js";
@@ -18,10 +18,7 @@ import { loadBuckets, render, renderHtml, writeSummary } from "./report.js";
 import { secondOpinion } from "./rubric.js";
 import { appendAuditor, appendEpisode, appendTurn, closeConsoleTable, consoleTableRow, consoleTurn, openConsoleTable, readUsage } from "./turnlog.js";
 
-/**
- * @param {string} text
- * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} env
- */
+// Parses KEY=value lines, skips blanks and # comments, and never overrides a key already set.
 export function applyEnvText(text, env) {
   for (const raw of String(text).split(/\r?\n/)) {
     const line = raw.trim();
@@ -49,10 +46,6 @@ function stripInlineComment(value) {
   return hash >= 0 ? value.slice(0, hash).trimEnd() : value;
 }
 
-/**
- * @param {string} [cwd]
- * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} [env]
- */
 export function loadEnvFile(cwd = process.cwd(), env = process.env) {
   let text = "";
   try {
@@ -63,10 +56,9 @@ export function loadEnvFile(cwd = process.cwd(), env = process.env) {
   return applyEnvText(text, env);
 }
 
-/**
- * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} env
- * @param {string} [cwd]
- */
+// Accepts env, where TARGET names the folder, and an optional working directory.
+// Loads and parses targets/<TARGET>/profile.yaml. Rejects a bad folder name, a missing file, or an empty document.
+// Returns the profile object.
 export async function loadProfile(env, cwd = process.cwd()) {
   const target = env.TARGET || "demo";
   if (!/^[A-Za-z0-9._-]+$/.test(target)) throw new Error(`TARGET is not a single folder name: ${target}`);
@@ -113,8 +105,12 @@ function auditorConfig(profile, env) {
   };
 }
 
+// Accepts the episode context: behavior, profile, env, transport, campaign dir, hash, model id, auditor, register, and logRow.
+// Sends scripted turns, then asks the drafter while turns remain and the oracle has not hit. A hit before minTurns is kept. 
+// Transport stays open. A miss exhausts the behavior. A finished hit is saved as claimed and may store a rubric disagreement.
+// Returns { kind: "hit" | "held" | "miss" | "transport", item? }.
 async function runEpisode(ctx) {
-  const { behavior, profile, env, dialect, dir, hash, modelId, auditor, register, logRow } = ctx;
+  const { behavior, profile, env, transport, dir, hash, modelId, auditor, register, logRow } = ctx;
   const oracle = profile.oracles.find((item) => item.id === behavior.goal);
   const planned = scriptedTurns(behavior);
   const turns = [];
@@ -126,6 +122,8 @@ async function runEpisode(ctx) {
   const limits = profile.limits;
   const key = env[profile.env.targetKey] || undefined;
   const model = env[profile.env.targetModel] || undefined;
+
+
   const logAuditor = async (kind, result, outcome) => {
     const at = new Date().toISOString();
     const ms = Number.isFinite(outcome?.ms) ? outcome.ms : null;
@@ -142,6 +140,9 @@ async function runEpisode(ctx) {
     await appendAuditor(dir, behavior.id, { at, kind, ms, usage, result });
   };
 
+  // Accepts the episode result and, on a hit, the 1-based turn that hit.
+  // Appends the episode footer: result, session, model, and campaign hash.
+  // Returns the append promise.
   const closeEpisode = (result, turnsToHit) =>
     appendEpisode(dir, behavior.id, {
       result,
@@ -176,7 +177,7 @@ async function runEpisode(ctx) {
     let turn;
     const started = Date.now();
     try {
-      turn = await dialect.send({
+      turn = await transport.send({
         url: env[profile.env.targetUrl],
         allowHosts: profile.allowHosts,
         key,
@@ -303,21 +304,21 @@ async function runEpisode(ctx) {
   return { kind: "miss" };
 }
 
-/**
- * @param {{ env?: NodeJS.ProcessEnv | Record<string, string | undefined>, cwd?: string }} [options]
- */
+// Accepts optional { env, cwd, fresh }. Defaults are .env in the working directory and process.cwd(). fresh archives the active campaign and starts a new folder.
+// Checks the profile, then walks behaviors that are still open. A transport or held outcome is not pulled again in this pass. 
+// Writes summary.html and prints the results table. Does not confirm a finding.
+// Returns { ok: true, dir, hash, modelId }. A failed preflight throws the printed fatal error.
 export async function main(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? loadEnvFile(cwd);
   const profile = await loadProfile(env, cwd);
   const checked = await preflight(profile, env, cwd);
   if (!checked.ok) throw fatal(checked.errors.join("; "));
-  const placed = await adoptCampaign(profile, checked.modelId, cwd);
+  const placed = await adoptCampaign(profile, checked.modelId, cwd, { fresh: options.fresh === true });
   const hash = placed.hash;
   const dir = placed.dir;
   const register = await loadRegister(dir, profile.behaviors);
-  // targets/<id>/adapter.js replaces the dialect when the folder ships one.
-  const dialect = await loadTransport(profile, env, cwd);
+  const transport = await loadTransport(profile, env, cwd);
   const auditor = auditorConfig(profile, env);
   const targetModel = env[profile.env.targetModel] || "-";
   const auditorModel = auditor.model || "-";
@@ -327,6 +328,9 @@ export async function main(options = {}) {
   let episode = 0;
   let consoleWidths = null;
   let lastBehavior = null;
+  // Accepts one console row as cell strings. The behavior id is the second cell.
+  // Opens the turn-log table on the first row and draws a rule when the behavior changes.
+  // Returns nothing.
   const logRow = (cells) => {
     if (!consoleWidths) {
       console.log(banner("TURN LOG"));
@@ -353,7 +357,7 @@ export async function main(options = {}) {
       behavior,
       profile,
       env,
-      dialect,
+      transport,
       dir,
       hash,
       modelId: checked.modelId,
@@ -376,13 +380,7 @@ export async function main(options = {}) {
   return { ok: true, dir, hash, modelId: checked.modelId };
 }
 
-function invokedDirectly() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (invokedDirectly()) {
+if (invokedDirectly(import.meta.url)) {
   main().catch((err) => {
     if (!err.printed) console.error(err.message);
     process.exit(1);

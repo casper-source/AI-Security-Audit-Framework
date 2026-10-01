@@ -1,12 +1,10 @@
-// Server-session dialect. Sends one new user message and keeps the session id.
-// Host check, redirect refusal, and retry policy live here, not in the profile.
-// Must not redact the target request, follow redirects, or decide an oracle hit.
+// Shared target HTTP. Owns the host check, redirect refusal, and the retry loop.
+// A 429, a 502, a timeout, or a connection failure is retried up to five times. The caller passes the timeout.
+// Must not choose a path, parse a product envelope, or decide an oracle hit.
 
 import { setTimeout as sleep } from "node:timers/promises";
 
-const HEALTH_PATH = "/health";
-const CHAT_PATH = "/chat";
-const TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 10_000;
 const BACKOFF_MS = [200, 400, 800, 1600, 3200];
 const MAX_RETRIES = 5;
 const DEFAULT_HOSTS = new Set(["localhost", "127.0.0.1"]);
@@ -17,6 +15,7 @@ const RETRYABLE_CODES = new Set([
   "ENOTFOUND",
   "EHOSTUNREACH",
   "EPIPE",
+  "ETIMEDOUT",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_SOCKET",
   "UND_ERR_HEADERS_TIMEOUT",
@@ -24,6 +23,10 @@ const RETRYABLE_CODES = new Set([
 ]);
 
 export class TransportError extends Error {
+  /**
+   * @param {string} message
+   * @param {{ retryable?: boolean }} [options]
+   */
   constructor(message, options = {}) {
     super(message);
     this.name = "TransportError";
@@ -66,6 +69,20 @@ function redirectError(err) {
   return /redirect/i.test(text);
 }
 
+function httpFailure(status, text) {
+  let detail = "";
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed?.error?.message === "string" && parsed.error.message.length > 0) detail = `: ${parsed.error.message}`;
+  } catch {
+    detail = "";
+  }
+  return `HTTP ${status}${detail}`;
+}
+
+/**
+ * @param {{ url: string, allowHosts: string[], key?: string, method: string, path: string, payload?: object, emptyBody?: boolean, timeoutMs?: number }} options
+ */
 async function once(endpoint, options) {
   const headers = {};
   if (options.key) headers.authorization = `Bearer ${options.key}`;
@@ -78,15 +95,14 @@ async function once(endpoint, options) {
   const response = await fetch(endpoint, {
     method: options.method,
     redirect: "error",
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     headers,
     body,
   });
-  if (response.status === 429 || response.status === 502) {
-    throw new TransportError(`HTTP ${response.status}`, { retryable: true });
-  }
+  if (response.status === 429) throw new TransportError("HTTP 429", { retryable: true });
   const text = await response.text();
-  if (!response.ok) throw new TransportError(`HTTP ${response.status}`);
+  if (response.status === 502) throw new TransportError(httpFailure(response.status, text), { retryable: true });
+  if (!response.ok) throw new TransportError(httpFailure(response.status, text));
   try {
     return JSON.parse(text);
   } catch {
@@ -94,7 +110,10 @@ async function once(endpoint, options) {
   }
 }
 
-async function targetRequest(options) {
+/**
+ * @param {{ url: string, allowHosts: string[], key?: string, method: string, path: string, payload?: object, emptyBody?: boolean, timeoutMs?: number }} options
+ */
+export async function request(options) {
   const origin = assertAllowedUrl(options.url, options.allowHosts);
   const endpoint = new URL(options.path, origin);
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
@@ -111,67 +130,4 @@ async function targetRequest(options) {
     }
   }
   throw new TransportError("transport failure");
-}
-
-function parseTurn(payload, user) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload) || typeof payload.reply?.text !== "string") {
-    throw new TransportError("broken envelope");
-  }
-  const toolCalls = Array.isArray(payload.tool_calls)
-    ? payload.tool_calls.map((call) => ({
-        name: typeof call?.name === "string" ? call.name : "",
-        args: call?.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args : {},
-      }))
-    : [];
-  return {
-    user,
-    reply: payload.reply.text,
-    toolCalls,
-    oracle: payload,
-    sessionId: typeof payload.session_id === "string" ? payload.session_id : null,
-  };
-}
-
-/**
- * @param {{ url: string, allowHosts: string[], key?: string }} options
- * @returns {Promise<{ ok: true, model: string }>}
- */
-export async function health(options) {
-  const payload = await targetRequest({ ...options, method: "GET", path: HEALTH_PATH });
-  if (!payload || payload.ok !== true || typeof payload.model !== "string" || payload.model.length === 0) {
-    throw new TransportError("broken envelope");
-  }
-  return { ok: true, model: payload.model };
-}
-
-/**
- * @param {{ url: string, allowHosts: string[], key?: string, model?: string, user: string, sessionId?: string }} options
- */
-export async function send(options) {
-  const payload = { message: options.user };
-  if (options.sessionId) payload.session_id = options.sessionId;
-  if (options.model) payload.model = options.model;
-  const envelope = await targetRequest({
-    url: options.url,
-    allowHosts: options.allowHosts,
-    key: options.key,
-    method: "POST",
-    path: CHAT_PATH,
-    payload,
-  });
-  return parseTurn(envelope, options.user);
-}
-
-/**
- * @param {{ url: string, allowHosts: string[], key?: string, path: string }} options
- */
-export async function reset(options) {
-  await targetRequest({
-    url: options.url,
-    allowHosts: options.allowHosts,
-    key: options.key,
-    method: "POST",
-    path: options.path,
-    emptyBody: true,
-  });
 }

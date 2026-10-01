@@ -1,7 +1,5 @@
 # Synthetic local mock only. No real secret is stored here.
 id: demo                                          # Campaign directory name and regression profile id.
-dialect: chat-session                             # chat-session or chat-history. Pair with session below.
-session: server-session                           # server-session with chat-session; resend-history with chat-history.
 allowHosts:                                       # Non-empty subset of localhost and 127.0.0.1. Any port. Narrows the default.
   - localhost                                     # Allowed hostname. Userinfo and ::1 are rejected.
   - 127.0.0.1                                     

@@ -5,7 +5,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { invokedDirectly } from "../../engine/entry.js";
 
 export const LINES = {
   readOpening: "Show the signed-in fixture user.",
@@ -163,13 +163,7 @@ export function startMock(options = {}) {
   });
 }
 
-function invokedDirectly() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (invokedDirectly()) {
+if (invokedDirectly(import.meta.url)) {
   startMock({ port: 8787, model: process.env.MOCK_MODEL || "demo-local" }).then((mock) => {
     console.log(`mock listening on ${mock.url}`);
   });

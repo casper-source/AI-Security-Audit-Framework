@@ -5,15 +5,8 @@
 import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import * as chatHistory from "../dialects/chat-history.js";
-import * as chatSession from "../dialects/chat-session.js";
 import { readPath } from "./judge.js";
 
-const DIALECTS = {
-  "chat-session": chatSession,
-  "chat-history": chatHistory,
-};
-const PAIRS = new Set(["chat-session/server-session", "chat-history/resend-history"]);
 const HOSTS = new Set(["localhost", "127.0.0.1"]);
 const IMPACTS = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
 const ENV_ROLES = ["targetUrl", "targetKey", "targetModel", "auditorUrl", "auditorKey", "auditorModel"];
@@ -42,7 +35,8 @@ function validateShape(profile) {
   const errors = [];
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) return ["profile must be an object"];
   if (typeof profile.id !== "string" || !ID_PATTERN.test(profile.id)) errors.push("id must be a lowercase slug");
-  if (!PAIRS.has(`${profile.dialect}/${profile.session}`)) errors.push("dialect/session pair is not allowed");
+  if (Object.hasOwn(profile, "dialect")) errors.push("dialect is not a profile field");
+  if (Object.hasOwn(profile, "session")) errors.push("session is not a profile field");
   if (!Array.isArray(profile.allowHosts) || profile.allowHosts.length === 0) {
     errors.push("allowHosts must be a non-empty subset of localhost and 127.0.0.1");
   } else if (profile.allowHosts.some((host) => !HOSTS.has(String(host).toLowerCase()))) {
@@ -184,19 +178,21 @@ function validateLeak(profile) {
 }
 
 /**
- * Uses targets/<TARGET>/adapter.js when that file exists. Otherwise the profile dialect.
- * @param {object} profile
+ * Loads targets/<TARGET>/adapter.js. A missing file or a bad target name throws.
+ * @param {object} _profile
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} env
  * @param {string} [cwd]
  */
-export async function loadTransport(profile, env, cwd = process.cwd()) {
+export async function loadTransport(_profile, env, cwd = process.cwd()) {
   const target = env?.TARGET || "demo";
-  if (!/^[A-Za-z0-9._-]+$/.test(target)) return DIALECTS[profile.dialect];
+  if (!/^[A-Za-z0-9._-]+$/.test(target)) {
+    throw Object.assign(new Error("target name is not allowed"), { code: "BAD_TARGET" });
+  }
   const adapterFile = resolve(cwd, "targets", target, "adapter.js");
   try {
     await access(adapterFile);
   } catch (err) {
-    if (err.code === "ENOENT") return DIALECTS[profile.dialect];
+    if (err.code === "ENOENT") throw Object.assign(new Error("adapter is missing"), { code: "ENOENT" });
     throw err;
   }
   return import(pathToFileURL(adapterFile).href);
@@ -230,9 +226,15 @@ export async function preflight(profile, env, cwd = process.cwd()) {
     } else if (auditor.error) urlErrors.push(auditor.error.replace("host is not allowed", "auditor host is not allowed"));
   }
   if (urlErrors.length > 0) return { ok: false, errors: urlErrors, modelId: null };
-  const dialect = await loadTransport(profile, env, cwd);
+  let transport;
   try {
-    const health = await dialect.health({
+    transport = await loadTransport(profile, env, cwd);
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "BAD_TARGET") return { ok: false, errors: [err.message], modelId: null };
+    throw err;
+  }
+  try {
+    const health = await transport.health({
       url: targetUrl,
       allowHosts: profile.allowHosts,
       key: env[profile.env.targetKey] || undefined,

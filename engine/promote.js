@@ -7,15 +7,14 @@ import { resolve } from "node:path";
 
 /**
  * @param {string} dir
- * @param {{ behaviorId: string, profileId: string, hash: string, model: string, session: string, turns: string[], oracle: object }} spec
+ * @param {{ behaviorId: string, profileId: string, hash: string, model: string, turns: string[], oracle: object }} spec
  */
 export async function promote(dir, spec) {
   const body = {
-    comment: "Replay these user turns with the dialect session mode and assert the oracle. Do not join them into one prompt.",
+    comment: "Replay these user turns on a fresh session and assert the oracle. Do not join them into one prompt.",
     profileId: spec.profileId,
     hash: spec.hash,
     model: spec.model,
-    session: spec.session,
     turns: spec.turns,
     oracle: spec.oracle,
   };

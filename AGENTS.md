@@ -6,10 +6,10 @@ This is not a general-purpose attack tool. Do not add attack procedures, payload
 
 ## Where things live
 
-- `engine/` and `dialects/` are product-agnostic. They must not contain a product name, a secret, a seed sentence, an oracle string, the demo canary `DEMO-CANARY-NOT-A-SECRET`, or a public host such as `example.com`. A test reads every file under those two directories and fails on the canary or `example.com`.
-- Target-specific text lives only in `targets/<id>/`. `targets/mercibank/adapter.js` is the MerciBank wire. `targets/demo/` is the mock. If `targets/<id>/adapter.js` exists, preflight, run, and verify use it instead of the dialect.
+- `engine/` is product-agnostic. It must not contain a product name, a secret, a seed sentence, an oracle string, the demo canary `DEMO-CANARY-NOT-A-SECRET`, or a public host such as `example.com`. A test reads every file under `engine/` and fails on the canary or `example.com`.
+- Target-specific text lives only in `targets/<id>/`. Each pack has `profile.yaml` and `adapter.js`. `targets/mercibank/adapter.js` is the MerciBank wire. `targets/demo/` is the mock. Preflight, run, and verify load that adapter. A missing adapter is a preflight error.
 - Do not edit the MerciBank lab server. Do not read that lab's `.env` or copy `MERCI_LLM_API_KEY`. The harness key is `TARGET_KEY` in this repo's gitignored `.env`.
-- Campaign output is `campaigns/<profile.id>/<hash>/`. The hash is the first 12 hex characters of SHA-256 over the canonical profile JSON, a newline, and the model id from `GET /health`. YAML comments do not change the hash. `limits.reproRuns`, `limits.reproMin`, and `limits.maxConcurrency` do not change the hash. Any other profile edit, or a different health model id, starts a new directory. If that new directory has no register and exactly one older campaign for the same health model does, the older folder is moved onto the new hash.
+- Campaign output is `campaigns/<profile.id>/<YYYY-MM-DD-HHMMSS>/`. The folder name is the local time the audit started. `campaign.json` stores the hash, the health model id, and `archived` after `run --fresh`. The hash is the first 12 hex characters of SHA-256 over the canonical profile JSON, a newline, and the model id from `GET /health`. YAML comments do not change the hash. `limits.reproRuns`, `limits.reproMin`, and `limits.maxConcurrency` do not change the hash. The same hash reopens the active folder. Archived folders are skipped unless `--campaign` names one. A different health model id starts a new folder. If the hash changes and exactly one older active campaign for the same health model has a register, that folder keeps its name and stores the new hash. A folder whose name is still 12 hex is renamed to a timestamp when it is opened.
 - The saved report is `summary.html`. The console `RESULTS` table is ASCII. Do not write `summary.md`.
 
 ## Stack
@@ -24,13 +24,14 @@ New source files start with a three-line comment: what the file owns, what it gu
 
 | Command | Effect |
 |---|---|
-| `npm run check` | Profile and health. No turns. |
-| `npm run audit` | Coverage pass. Never deletes a campaign. |
-| `npm run clean` | Deletes `campaigns/<profile.id>/` for the current target only, then runs the coverage pass. |
-| `npm run verify` | Replays every saved audit transcript, including ones already confirmed, rejected, or transport. Repeat it after changing reproduction limits. Exits 0 even when every finding is rejected or transport. |
-| `npm run status` | Register. No turns. |
-| `npm run summary` | Opens `summary.html` for the live health model. If health fails, opens the newest local campaign and says so. |
-| `npm run logs` | Opens that campaign's `logs/` folder. |
+| `.\audit.cmd check` | Profile and health. No turns. |
+| `.\audit.cmd run` | Coverage pass. Resumes the active campaign. Never deletes. |
+| `.\audit.cmd run --fresh` | Archives the active campaign, starts a new folder, and sends every behavior. |
+| `.\audit.cmd clean` | Deletes `campaigns/<profile.id>/` for the current target only. Does not run. |
+| `.\audit.cmd verify` | Replays the active campaign, including findings already confirmed, rejected, or transport. `--campaign <folder>` selects an archived folder. Optional behavior ids limit the replay. Repeat it after changing reproduction limits. Exits 0 even when every finding is rejected or transport. |
+| `.\audit.cmd status` | Register. No turns. `--campaign <folder>` selects a folder. |
+| `.\audit.cmd summary` | Opens the most recently modified `summary.html` for this target. If health fails, says so. `--campaign` names a folder. |
+| `.\audit.cmd logs` | Opens that campaign's `logs/` folder. `--campaign <folder>` selects a folder. |
 | `npm run mock` | Demo target on `127.0.0.1:8787`. |
 | `npm test` | `node --test test/*.test.js`. |
 
@@ -57,15 +58,15 @@ Turn sources are `opening`, `follow-up`, and `draft`. Do not store `script`. An 
 ## Engine rules
 
 - Hosts are `localhost` and `127.0.0.1` only. `::1` and userinfo are rejected. `http` and `https` only. A profile may only narrow the allowlist. When `auditor.remote` is false, the auditor URL must use one of those two hosts.
-- Dialects return `{ user, reply, toolCalls, oracle, sessionId }`. `oracle` is the full JSON body.
+- Adapters return `{ user, reply, toolCalls, oracle, sessionId }`. `oracle` is the full JSON body. Host check, redirect refusal, and retry live in `engine/transport.js`. An adapter passes its timeout.
 - Retry 429, 502, timeout, and connection failure, up to five times, with backoff 200, 400, 800, 1600, 3200 ms. Other HTTP errors, including a broken 200, are not retried. Redirects are not followed (`redirect: "error"`). `delayMs` is the pause between user turns, not between retries.
 - A text hit is a case-insensitive match in the reply that is not already in that turn's user text. The stored `matched` value keeps the reply's casing. A flag hit is `Object.is` on the dotted path. A missing path is a non-hit (`oracle path missing` in the log). Presence of a key is not a hit. Quote a numeric-looking flag value in YAML or it parses as a number and `Object.is` fails.
 - A hit before `minTurns` is kept, and scripted turns continue until `minTurns`. `turnsToHit` is the first hitting turn, 1-based.
 - The drafter runs only after scripted follow-ups are exhausted, while turns remain and the oracle has not hit. If the drafter is unset, log `unset` and end the episode. Do not invent a user message. An unset auditor skips the rubric quietly. The rubric stores a rationale. It does not promote or reject.
 - Redact longest-needle-first, and only on text sent to the auditor. Never redact the target request.
 - Verify replays each saved user turn as its own request on a fresh session. Never join turns into one prompt. Read-only repetitions may run up to `maxConcurrency`. Stateful verify is sequential: replay, reset, replay, reset, replay. One benign partner may be shared. `benignOf` must name a behavior whose own `benignOf` is null.
-- The verify console prints the model line, then `reproduction runs: <reproRuns>, min hit to verify: <reproMin>`, then one row per finished repetition: `index`, `behavior`, `result`, `hits`, `ms`, `tokens`. `hits` counts hits so far for that behavior. A rule line separates behaviors. Rows print in repetition order even when repetitions run in parallel. A transport retry does not add a second index. An empty candidate list prints `no candidates`. Every replayed turn still goes to `logs/<behaviorId>.md`. Verify reads claimed, confirmed, rejected, and transport transcripts, so a later run with new `reproRuns` or `reproMin` replays the same audit. `npm run verify -- <id> <id>` replays only those behaviors, in profile order. The others stay as they are. An unknown id, or an id with no audit transcript, stops before any turn. A miss against the new bar demotes a confirmed behavior to `candidate` and deletes its regression file.
-- Regression JSON key order is `comment`, `profileId`, `hash`, `model`, `session`, `turns`, `oracle`.
+- The verify console prints the model line, then `reproduction runs: <reproRuns>, min hit to verify: <reproMin>`, then one row per finished repetition: `index`, `behavior`, `result`, `hits`, `ms`, `tokens`. `hits` counts hits so far for that behavior. A rule line separates behaviors. Rows print in repetition order even when repetitions run in parallel. A transport retry does not add a second index. An empty candidate list prints `no candidates`. Every replayed turn still goes to `logs/<behaviorId>.md`. Verify reads claimed, confirmed, rejected, and transport transcripts, so a later run with new `reproRuns` or `reproMin` replays the same audit. `.\audit.cmd verify <id> <id>` replays only those behaviors, in profile order. `.\audit.cmd verify --campaign <folder> <id>` reads that folder. The others stay as they are. An unknown id, or an id with no audit transcript, stops before any turn. A miss against the new bar demotes a confirmed behavior to `candidate` and deletes its regression file.
+- Regression JSON key order is `comment`, `profileId`, `hash`, `model`, `turns`, `oracle`.
 
 ## MerciBank pack
 

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "audit": "engine/cli.js"
+  },
   "engines": {
     "node": ">=18"
   },

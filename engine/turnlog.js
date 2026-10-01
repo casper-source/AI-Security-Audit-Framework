@@ -25,9 +25,18 @@ export function readUsage(body) {
   };
 }
 
+function label(name, value) {
+  return `**${name}:** ${value}`;
+}
+
+function body(name, value) {
+  const text = String(value ?? "").replace(/\s+$/u, "");
+  return `**${name}:**\n\n${text}`;
+}
+
 function tokenLine(usage) {
-  if (usage.total == null) return "tokens: -";
-  let line = `tokens: ${usage.total}`;
+  if (usage.total == null) return label("tokens", "-");
+  let line = label("tokens", usage.total);
   if (usage.prompt != null) line += ` prompt=${usage.prompt}`;
   if (usage.completion != null) line += ` completion=${usage.completion}`;
   return line;
@@ -64,11 +73,12 @@ async function writeLine(dir, behaviorId, text) {
 export async function appendAuditor(dir, behaviorId, entry) {
   const text = [
     `### ${entry.at}`,
-    "source: auditor",
-    `kind: ${entry.kind}`,
-    `ms: ${entry.ms == null ? "-" : entry.ms}`,
+    "",
+    label("source", "auditor"),
+    label("kind", entry.kind),
+    label("ms", entry.ms == null ? "-" : entry.ms),
     tokenLine(entry.usage ?? { total: null, prompt: null, completion: null }),
-    `result: ${entry.result}`,
+    label("result", entry.result),
     "",
     "",
   ].join("\n");
@@ -83,13 +93,17 @@ export async function appendAuditor(dir, behaviorId, entry) {
 export async function appendTurn(dir, behaviorId, entry) {
   const text = [
     `### ${entry.at}`,
-    `source: ${entry.source}`,
-    `ms: ${entry.ms}`,
+    "",
+    label("source", entry.source),
+    label("ms", entry.ms),
     tokenLine(readUsage(entry.oracle)),
-    `Question: ${entry.user}`,
-    `Answer: ${entry.reply}`,
-    `Tools: ${formatTools(entry.toolCalls)}`,
-    `Judge: ${judgeLine(entry)}`,
+    "",
+    body("Question", entry.user),
+    "",
+    body("Answer", entry.reply),
+    "",
+    label("Tools", formatTools(entry.toolCalls)),
+    label("Judge", judgeLine(entry)),
     "",
     "",
   ].join("\n");
@@ -103,9 +117,9 @@ export async function appendTurn(dir, behaviorId, entry) {
  */
 export async function appendEpisode(dir, behaviorId, fields) {
   const session = fields.sessionId || "-";
-  const lines = [`episode ${behaviorId}`, `result=${fields.result}`];
-  if (fields.result === "hit" && fields.turnsToHit) lines.push(`turnsToHit=${fields.turnsToHit}`);
-  lines.push(`session=${session}`, `model=${fields.model}`, `hash=${fields.hash}`, "", "");
+  const lines = [label("episode", behaviorId), label("result", fields.result)];
+  if (fields.result === "hit" && fields.turnsToHit) lines.push(label("turnsToHit", fields.turnsToHit));
+  lines.push(label("session", session), label("model", fields.model), label("hash", fields.hash), "", "");
   await writeLine(dir, behaviorId, `${lines.join("\n")}\n`);
 }
 
@@ -116,11 +130,15 @@ export async function appendEpisode(dir, behaviorId, fields) {
  */
 export async function appendReplay(dir, behaviorId, fields) {
   const session = fields.sessionId || "-";
-  await writeLine(
-    dir,
-    behaviorId,
-    `replay ${fields.rep} session=${session} result=${fields.result} retry=${fields.retried ? "yes" : "no"}\n\n`,
-  );
+  const lines = [
+    label("replay", fields.rep),
+    label("session", session),
+    label("result", fields.result),
+    label("retry", fields.retried ? "yes" : "no"),
+    "",
+    "",
+  ];
+  await writeLine(dir, behaviorId, `${lines.join("\n")}\n`);
 }
 
 const CONSOLE_HEADERS = ["time", "behavior", "turn", "source", "result", "ms", "tokens"];

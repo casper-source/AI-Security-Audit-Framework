@@ -1,16 +1,14 @@
-// Masks configured needles in text that is about to leave the machine.
-// Longest needle wins so a short needle cannot split a longer one.
-// Must not be used on the target request, and must not log a needle.
+// Masks the profile's redact strings in text sent to the auditor, whether that model is local or cloud.
+// The longest string is replaced first, so a shorter one cannot cut it and leave the rest visible.
+// Must not be used on the request sent to the lab, and must not log the original string.
 
 const MASK = "[redacted]";
 
-/**
- * @param {string} text
- * @param {string[]} needles
- * @returns {string}
- */
-export function redact(text, needles) {
-  const list = (needles ?? [])
+// Accepts the text about to be sent to the auditor and the redact strings from the profile.
+// Replaces each of those strings with [redacted]. An empty list leaves the text unchanged.
+// Returns the masked text.
+export function redact(text, redactStrings) {
+  const list = (redactStrings ?? [])
     .filter((needle) => typeof needle === "string" && needle.length > 0)
     .sort((left, right) => right.length - left.length);
   let masked = String(text ?? "");

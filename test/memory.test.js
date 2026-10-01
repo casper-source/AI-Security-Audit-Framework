@@ -2,9 +2,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { adoptCampaign, campaignDir, campaignHash, listCandidates, listReplayable, saveFinding } from "../engine/memory.js";
 import { applyEnvText } from "../engine/run.js";
@@ -25,7 +25,7 @@ test("hash sorts object keys and keeps array order", () => {
   assert.equal(base.limits.reproRuns, 3);
 });
 
-test("adopt moves the only older audit folder onto the current hash", async () => {
+test("adopt renames a hash folder and stores the current hash", async () => {
   const cwd = await mkdtemp(resolve(tmpdir(), "audit-adopt-"));
   const profile = { id: "adopt-fixture", limits: { maxTurns: 1, reproRuns: 9, reproMin: 4, maxConcurrency: 1 } };
   const old = campaignDir(profile.id, "aaaaaaaaaaaa", cwd);
@@ -34,10 +34,95 @@ test("adopt moves the only older audit folder onto the current hash", async () =
   await writeFile(resolve(old, "regression", "one.json"), "{\"model\":\"model\"}\n");
   try {
     const placed = await adoptCampaign(profile, "model", cwd);
-    assert.equal(placed.movedFrom, "aaaaaaaaaaaa");
+    assert.equal(placed.renamedFrom, "aaaaaaaaaaaa");
     assert.equal(placed.hash, campaignHash(profile, "model"));
+    assert.match(basename(placed.dir), /^\d{4}-\d{2}-\d{2}-\d{6}/);
     await access(resolve(placed.dir, "register.json"));
+    const saved = JSON.parse(await readFile(resolve(placed.dir, "campaign.json"), "utf8"));
+    assert.equal(saved.hash, placed.hash);
+    assert.equal(saved.model, "model");
     await assert.rejects(() => access(old));
+    const again = await adoptCampaign(profile, "model", cwd);
+    assert.equal(again.dir, placed.dir);
+    assert.equal(again.renamedFrom, null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("fresh archives the active campaign and starts another folder", async () => {
+  const cwd = await mkdtemp(resolve(tmpdir(), "audit-fresh-"));
+  const profile = { id: "fresh-fixture", limits: { maxTurns: 1 } };
+  try {
+    const first = await adoptCampaign(profile, "model", cwd);
+    await writeFile(resolve(first.dir, "register.json"), "{}\n");
+    const lines = [];
+    const write = console.log;
+    console.log = (line) => lines.push(String(line));
+    let second;
+    try {
+      second = await adoptCampaign(profile, "model", cwd, { fresh: true });
+    } finally {
+      console.log = write;
+    }
+    assert.notEqual(second.dir, first.dir);
+    assert.equal(second.hash, first.hash);
+    const archived = JSON.parse(await readFile(resolve(first.dir, "campaign.json"), "utf8"));
+    assert.equal(archived.archived, true);
+    await access(resolve(first.dir, "register.json"));
+    const text = lines.join("\n");
+    assert.match(text, /archived audit campaign/);
+    assert.match(text, /started audit campaign/);
+    const resumed = await adoptCampaign(profile, "model", cwd);
+    assert.equal(resumed.dir, second.dir);
+    const named = await adoptCampaign(profile, "model", cwd, { campaign: basename(first.dir) });
+    assert.equal(named.dir, first.dir);
+    await assert.rejects(() => adoptCampaign(profile, "model", cwd, { campaign: "missing-folder" }), /No campaign folder/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("adopt keeps a timestamp folder when the profile hash changes", async () => {
+  const cwd = await mkdtemp(resolve(tmpdir(), "audit-keep-"));
+  const profile = { id: "keep-fixture", limits: { maxTurns: 1 } };
+  try {
+    const first = await adoptCampaign(profile, "model", cwd);
+    await writeFile(resolve(first.dir, "register.json"), "{}\n");
+    const lines = [];
+    const write = console.log;
+    console.log = (line) => lines.push(String(line));
+    let second;
+    try {
+      second = await adoptCampaign({ id: "keep-fixture", limits: { maxTurns: 2 } }, "model", cwd);
+    } finally {
+      console.log = write;
+    }
+    assert.equal(second.dir, first.dir);
+    assert.equal(second.renamedFrom, null);
+    assert.notEqual(second.hash, first.hash);
+    const saved = JSON.parse(await readFile(resolve(second.dir, "campaign.json"), "utf8"));
+    assert.equal(saved.hash, second.hash);
+    assert.match(lines.join("\n"), /kept audit campaign/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("adopt does not give one model's campaign to another model", async () => {
+  const cwd = await mkdtemp(resolve(tmpdir(), "audit-model-"));
+  const profile = { id: "model-fixture", limits: { maxTurns: 1 } };
+  const old = campaignDir(profile.id, "aaaaaaaaaaaa", cwd);
+  await mkdir(resolve(old, "regression"), { recursive: true });
+  await writeFile(resolve(old, "register.json"), "{}\n");
+  await writeFile(resolve(old, "regression", "one.json"), "{\"model\":\"model\"}\n");
+  try {
+    const placed = await adoptCampaign(profile, "other-model", cwd);
+    assert.notEqual(placed.dir, old);
+    await access(resolve(old, "register.json"));
+    const saved = JSON.parse(await readFile(resolve(placed.dir, "campaign.json"), "utf8"));
+    assert.equal(saved.model, "other-model");
+    assert.match(basename(placed.dir), /^\d{4}-\d{2}-\d{2}-\d{6}/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
