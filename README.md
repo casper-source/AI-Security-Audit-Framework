@@ -34,16 +34,16 @@ audit summary [--campaign <folder>] Open summary.html.
 audit logs [--campaign <folder>]    Open the turn-log folder.
 ```
 
-`audit` with no arguments prints this list. 
-`audit run` resumes the active campaign and never deletes. `--fresh` keeps the old folder and starts another in active campaign. 
-`audit clean` deletes `campaigns/<profile.id>/` for the current target and stops. It leaves other targets' campaigns in place. 
-`audit check` prints the profile id, the model id from health, the campaign hash, and the campaign directory. 
-`audit verify` replays the active campaign and writes `regression/<behaviorId>.json` for each confirmed behavior. 
-`audit verify <behavior_id_1> <behavior_id_2>` replays only those behaviors, in profile order, and leaves the others untouched. 
-`audit verify --campaign <folder> <behavior_id>` replays that behavior from the named folder, including an archived audit. An unknown id stops before any turn.
-`audit summary` opens whichever `summary.html` was updated most recently for this target. 
-`audit status` prints each behavior's status, pulls, and wins. 
-`audit logs` opens the active campaign for the live health model. If the target is down and no folder is named, `audit logs` uses the newest local campaign and says so. `--campaign <folder>` selects one folder, including an archived audit.
+- `audit` with no arguments prints this list.
+- `audit run` resumes the active campaign and never deletes. `--fresh` keeps the old folder and starts another in active campaign.
+- `audit clean` deletes `campaigns/<profile.id>/` for the current target and stops. It leaves other targets' campaigns in place.
+- `audit check` prints the profile id, the model id from health, the campaign hash, and the campaign directory.
+- `audit verify` replays the active campaign and writes `regression/<behaviorId>.json` for each confirmed behavior.
+- `audit verify <behavior_id_1> <behavior_id_2>` replays only those behaviors, in profile order, and leaves the others untouched.
+- `audit verify --campaign <folder> <behavior_id>` replays that behavior from the named folder, including an archived audit. An unknown id stops before any turn.
+- `audit summary` opens whichever `summary.html` was updated most recently for this target.
+- `audit status` prints each behavior's status, pulls, and wins.
+- `audit logs` opens the active campaign for the live health model. If the target is down and no folder is named, `audit logs` uses the newest local campaign and says so. `--campaign <folder>` selects one folder, including an archived audit.
 
 ## Run the demo
 

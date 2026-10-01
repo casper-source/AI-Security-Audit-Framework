@@ -1,4 +1,6 @@
 node_modules/
 campaigns/
 .env
-targets/mercibank/
+targets/*
+!targets/demo/
+!targets/demo/**
